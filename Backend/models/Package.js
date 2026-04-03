@@ -46,6 +46,33 @@ const dimensionsSchema = new mongoose.Schema(
     { _id: false }
 );
 
+const locationSchema = new mongoose.Schema(
+    {
+        province: { type: String, required: true, trim: true },
+        district: { type: String, required: true, trim: true },
+        city: { type: String, required: true, trim: true }
+    },
+    { _id: false }
+);
+
+const pricingSnapshotSchema = new mongoose.Schema(
+    {
+        routeType: {
+            type: String,
+            enum: ['sameCity', 'sameDistrict', 'sameProvince', 'differentProvince'],
+            required: true
+        },
+        basePrice: { type: Number, required: true, min: 0 },
+        weight: { type: Number, required: true, min: 0 },
+        weightCharge: { type: Number, required: true, min: 0 },
+        perKgRate: { type: Number, required: true, min: 0 },
+        deliveryMultiplier: { type: Number, required: true, min: 1 },
+        codCharge: { type: Number, required: true, min: 0 },
+        totalPrice: { type: Number, required: true, min: 0 }
+    },
+    { _id: false }
+);
+
 const packageSchema = new mongoose.Schema(
     {
         trackingNumber: {
@@ -64,6 +91,8 @@ const packageSchema = new mongoose.Schema(
         receiverName: { type: String, required: true, trim: true },
         receiverPhone: { type: String, required: true, trim: true },
         receiverEmail: { type: String, trim: true, lowercase: true, default: '' },
+        senderLocation: { type: locationSchema, default: null },
+        receiverLocation: { type: locationSchema, default: null },
         pickupAddress: { type: String, required: true, trim: true },
         deliveryAddress: { type: String, required: true, trim: true },
         itemType: { type: String, required: true, trim: true },
@@ -76,6 +105,8 @@ const packageSchema = new mongoose.Schema(
         priority: { type: String, enum: ['standard', 'priority', 'critical'], default: 'standard' },
         paymentMode: { type: String, enum: ['prepaid', 'cod'], default: 'prepaid' },
         codAmount: { type: Number, default: 0, min: 0 },
+        shippingCharge: { type: Number, min: 0, default: 0 },
+        pricingSnapshot: { type: pricingSnapshotSchema, default: null },
         scheduledPickupAt: { type: Date, default: null },
         estimatedDeliveryAt: { type: Date, default: null },
         deliveredAt: { type: Date, default: null },

@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { isValidLocation } = require('../utils/locationCatalog');
 
 function buildAuthPayload(user) {
     return {
@@ -8,6 +9,9 @@ function buildAuthPayload(user) {
         name: user.name,
         email: user.email,
         phone: user.phone,
+        province: user.province,
+        district: user.district,
+        city: user.city,
         role: user.role,
         hub: user.hub,
         isActive: user.isActive
@@ -15,11 +19,22 @@ function buildAuthPayload(user) {
 }
 
 exports.register = async (req, res) => {
-    const { name, email, password, role, phone, hub } = req.body;
+    const { name, email, password, role, phone, hub, province, district, city } = req.body;
 
     try {
         if (!name || !email || !password) {
             return res.status(400).json({ message: 'Name, email, and password are required.' });
+        }
+
+        const selectedRole = role || 'sender';
+        const hasAnyLocation = province || district || city;
+
+        if (selectedRole === 'sender' && !isValidLocation({ province, district, city })) {
+            return res.status(400).json({ message: 'A valid province, district, and city are required for senders.' });
+        }
+
+        if (selectedRole !== 'sender' && hasAnyLocation && !isValidLocation({ province, district, city })) {
+            return res.status(400).json({ message: 'The selected province, district, and city combination is invalid.' });
         }
 
         const existingUser = await User.findOne({ email: email.toLowerCase() });
@@ -32,9 +47,12 @@ exports.register = async (req, res) => {
             name,
             email,
             password: hashedPassword,
-            role,
+            role: selectedRole,
             phone,
-            hub
+            hub,
+            province: province || '',
+            district: district || '',
+            city: city || ''
         });
 
         return res.status(201).json({

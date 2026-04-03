@@ -9,6 +9,8 @@ const authRoutes = require('./routes/authRoutes');
 const packageRoutes = require('./routes/packageRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const agentRoutes = require('./routes/agentRoutes');
+const locationRoutes = require('./routes/locationRoutes');
+const pricingRoutes = require('./routes/pricingRoutes');
 
 dotenv.config();
 
@@ -35,6 +37,8 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/locations', locationRoutes);
+app.use('/api/pricing', pricingRoutes);
 app.use('/api/package', packageRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/agent', agentRoutes);

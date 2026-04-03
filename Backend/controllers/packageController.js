@@ -6,6 +6,8 @@ const {
     getEstimatedDeliveryAt,
     isTransitionAllowed
 } = require('../utils/packageLifecycle');
+const { formatLocationLabel, isValidLocation } = require('../utils/locationCatalog');
+const { calculateDeliveryPrice, getPricingSettings } = require('../utils/pricingEngine');
 
 function buildActor(user) {
     return {
@@ -65,6 +67,8 @@ function mapPackageForPublicTracking(pkg) {
         itemType: pkg.itemType,
         status: pkg.status,
         currentStatus: pkg.currentStatus,
+        shippingCharge: pkg.shippingCharge,
+        pricingSnapshot: pkg.pricingSnapshot,
         estimatedDeliveryAt: pkg.estimatedDeliveryAt,
         deliveredAt: pkg.deliveredAt,
         assignedAgent: pkg.assignedAgent
@@ -114,8 +118,6 @@ const createPackage = async (req, res) => {
             receiverName,
             receiverPhone,
             receiverEmail,
-            pickupAddress,
-            deliveryAddress,
             itemType,
             parcelCategory,
             weight,
@@ -126,12 +128,51 @@ const createPackage = async (req, res) => {
             codAmount,
             declaredValue,
             scheduledPickupAt,
-            dimensions
+            dimensions,
+            province,
+            district,
+            city
         } = req.body;
 
-        if (!receiverName || !receiverPhone || !pickupAddress || !deliveryAddress || !itemType || !weight) {
-            return res.status(400).json({ message: 'Receiver, route, item, and weight details are required.' });
+        if (!receiverName || !receiverPhone || !itemType || !weight) {
+            return res.status(400).json({ message: 'Receiver, item, and weight details are required.' });
         }
+
+        const senderLocation = {
+            province: req.user.province,
+            district: req.user.district,
+            city: req.user.city
+        };
+        const receiverLocation = { province, district, city };
+        const normalizedWeight = Number(weight);
+
+        if (!isValidLocation(senderLocation)) {
+            return res.status(400).json({
+                message: 'Your sender profile is missing a valid province, district, and city.'
+            });
+        }
+
+        if (!isValidLocation(receiverLocation)) {
+            return res.status(400).json({
+                message: 'Receiver destination must include a valid province, district, and city.'
+            });
+        }
+
+        if (Number.isNaN(normalizedWeight) || normalizedWeight <= 0) {
+            return res.status(400).json({ message: 'Weight must be greater than zero.' });
+        }
+
+        const pricing = await getPricingSettings();
+        const pricingSnapshot = calculateDeliveryPrice({
+            senderLocation,
+            receiverLocation,
+            weight: normalizedWeight,
+            deliveryType,
+            paymentMode,
+            pricing
+        });
+        const pickupAddress = formatLocationLabel(senderLocation);
+        const deliveryAddress = formatLocationLabel(receiverLocation);
 
         const packageDocument = await Package.create({
             senderId: req.user._id,
@@ -143,17 +184,21 @@ const createPackage = async (req, res) => {
             receiverName,
             receiverPhone,
             receiverEmail,
+            senderLocation,
+            receiverLocation,
             pickupAddress,
             deliveryAddress,
             itemType,
             parcelCategory,
-            weight: Number(weight),
+            weight: normalizedWeight,
             instructions,
             deliveryType,
             priority,
             paymentMode,
             codAmount: Number(codAmount || 0),
             declaredValue: Number(declaredValue || 0),
+            shippingCharge: pricingSnapshot.totalPrice,
+            pricingSnapshot,
             scheduledPickupAt: scheduledPickupAt || null,
             estimatedDeliveryAt: getEstimatedDeliveryAt(deliveryType, scheduledPickupAt || new Date()),
             dimensions: {
