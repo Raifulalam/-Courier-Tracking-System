@@ -8,6 +8,7 @@ const {
 } = require('../utils/packageLifecycle');
 const { formatLocationLabel, isValidLocation } = require('../utils/locationCatalog');
 const { calculateDeliveryPrice, getPricingSettings } = require('../utils/pricingEngine');
+const { isNonNegativeNumber, isPositiveNumber, isValidEmail, isValidPhone, normalizeText } = require('../utils/validation');
 
 function buildActor(user) {
     return {
@@ -138,6 +139,14 @@ const createPackage = async (req, res) => {
             return res.status(400).json({ message: 'Receiver, item, and weight details are required.' });
         }
 
+        if (!isValidPhone(receiverPhone)) {
+            return res.status(400).json({ message: 'Please provide a valid receiver phone number.' });
+        }
+
+        if (receiverEmail && !isValidEmail(receiverEmail)) {
+            return res.status(400).json({ message: 'Please provide a valid receiver email address.' });
+        }
+
         const senderLocation = {
             province: req.user.province,
             district: req.user.district,
@@ -158,8 +167,20 @@ const createPackage = async (req, res) => {
             });
         }
 
-        if (Number.isNaN(normalizedWeight) || normalizedWeight <= 0) {
+        if (!isPositiveNumber(weight)) {
             return res.status(400).json({ message: 'Weight must be greater than zero.' });
+        }
+
+        if (paymentMode === 'cod' && !isPositiveNumber(codAmount)) {
+            return res.status(400).json({ message: 'COD shipments must include a positive COD amount.' });
+        }
+
+        if (declaredValue && !isNonNegativeNumber(declaredValue)) {
+            return res.status(400).json({ message: 'Declared value must be a non-negative number.' });
+        }
+
+        if (scheduledPickupAt && Number.isNaN(new Date(scheduledPickupAt).getTime())) {
+            return res.status(400).json({ message: 'Scheduled pickup time is invalid.' });
         }
 
         const pricing = await getPricingSettings();
@@ -181,17 +202,17 @@ const createPackage = async (req, res) => {
                 email: req.user.email,
                 phone: req.user.phone
             },
-            receiverName,
-            receiverPhone,
-            receiverEmail,
+            receiverName: normalizeText(receiverName),
+            receiverPhone: normalizeText(receiverPhone),
+            receiverEmail: normalizeText(receiverEmail),
             senderLocation,
             receiverLocation,
             pickupAddress,
             deliveryAddress,
-            itemType,
-            parcelCategory,
+            itemType: normalizeText(itemType),
+            parcelCategory: normalizeText(parcelCategory) || 'Parcel',
             weight: normalizedWeight,
-            instructions,
+            instructions: normalizeText(instructions),
             deliveryType,
             priority,
             paymentMode,
@@ -254,6 +275,8 @@ const updateStatus = async (req, res) => {
 
         if (status === 'Delivered') {
             pkg.deliveredAt = new Date();
+        } else if (pkg.deliveredAt) {
+            pkg.deliveredAt = null;
         }
 
         pkg.statusUpdates.push(buildStatusUpdate(status, req.user, note, location || pkg.deliveryAddress));
@@ -272,7 +295,7 @@ const updateStatus = async (req, res) => {
 
 const getUserPackages = async (req, res) => {
     try {
-        const packages = await Package.find({ senderId: req.user._id }).sort({ updatedAt: -1 });
+        const packages = await Package.find({ senderId: req.user._id }).sort({ updatedAt: -1 }).lean();
 
         return res.status(200).json({
             message: packages.length ? 'Shipments retrieved successfully.' : 'No shipments found for this sender.',
@@ -286,7 +309,7 @@ const getUserPackages = async (req, res) => {
 
 const getPackageById = async (req, res) => {
     try {
-        const pkg = await Package.findById(req.params.id);
+        const pkg = await Package.findById(req.params.id).lean();
 
         if (!pkg) {
             return res.status(404).json({ message: 'Shipment not found.' });
@@ -307,7 +330,7 @@ const getPackageById = async (req, res) => {
 
 const getAgentPackages = async (req, res) => {
     try {
-        const packages = await Package.find({ 'assignedAgent._id': req.user._id }).sort({ updatedAt: -1 });
+        const packages = await Package.find({ 'assignedAgent._id': req.user._id }).sort({ updatedAt: -1 }).lean();
 
         return res.status(200).json({
             message: 'Assigned shipments fetched successfully.',
@@ -321,7 +344,7 @@ const getAgentPackages = async (req, res) => {
 
 const getSenderDashboard = async (req, res) => {
     try {
-        const packages = await Package.find({ senderId: req.user._id }).sort({ updatedAt: -1 });
+        const packages = await Package.find({ senderId: req.user._id }).sort({ updatedAt: -1 }).lean();
         const stats = getStatusBreakdown(packages);
 
         return res.status(200).json({

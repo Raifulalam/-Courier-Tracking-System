@@ -17,6 +17,10 @@ const verifyToken = async (req, res, next) => {
             return res.status(401).json({ msg: 'User not found' });
         }
 
+        if (!user.isActive) {
+            return res.status(403).json({ msg: 'User account is inactive' });
+        }
+
         req.user = user; // ✅ Attach full user document
         next();
     } catch (err) {

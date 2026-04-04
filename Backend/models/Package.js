@@ -122,6 +122,9 @@ const packageSchema = new mongoose.Schema(
 );
 
 packageSchema.index({ 'assignedAgent._id': 1, status: 1 });
+packageSchema.index({ senderId: 1, updatedAt: -1 });
+packageSchema.index({ status: 1, updatedAt: -1 });
+packageSchema.index({ currentStatus: 1, updatedAt: -1 });
 
 packageSchema.pre('validate', function syncProfessionalDefaults(next) {
     if (!this.status) {

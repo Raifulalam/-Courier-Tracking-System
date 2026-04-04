@@ -28,4 +28,7 @@ const deliveryAssignmentSchema = new mongoose.Schema(
     { timestamps: true }
 );
 
+deliveryAssignmentSchema.index({ packageId: 1, createdAt: -1 });
+deliveryAssignmentSchema.index({ agentId: 1, createdAt: -1 });
+
 module.exports = mongoose.model('DeliveryAssignment', deliveryAssignmentSchema);

@@ -29,7 +29,10 @@ function buildStatusUpdate(status, user, note, location = '') {
 
 const getAllUsers = async (req, res) => {
     try {
-        const users = await User.find().sort({ createdAt: -1 }).lean();
+        const users = await User.find()
+            .select('-password')
+            .sort({ createdAt: -1 })
+            .lean();
 
         const byRole = users.reduce((acc, user) => {
             acc[user.role] = (acc[user.role] || 0) + 1;
@@ -103,6 +106,9 @@ const assignAgentToPackage = async (req, res) => {
         const agent = await User.findById(agentId);
         if (!agent || agent.role !== 'agent') {
             return res.status(400).json({ message: 'Invalid agent selected.' });
+        }
+        if (!agent.isActive) {
+            return res.status(400).json({ message: 'The selected agent account is inactive.' });
         }
 
         pkg.assignedAgent = {
