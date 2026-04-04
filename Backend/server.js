@@ -35,9 +35,17 @@ const corsOriginHandler = (origin, callback) => {
 
     return callback(new Error('CORS policy blocked this origin.'));
 };
-const io = new Server(server, { cors: { origin: allowAnyOrigin ? true : allowedOrigins } });
+const io = new Server(server, {
+    cors: {
+        origin: "*"
+    }
+});
 
-app.use(cors({ origin: corsOriginHandler }));
+app.use(cors({
+    origin: corsOriginHandler,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true
+}));
 app.use(express.json());
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
