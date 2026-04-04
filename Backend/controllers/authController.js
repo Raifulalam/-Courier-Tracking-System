@@ -19,6 +19,16 @@ function buildAuthPayload(user) {
     };
 }
 
+function createSignedToken(user) {
+    if (!process.env.JWT_SECRET) {
+        throw new Error('JWT_SECRET is missing from Backend/.env');
+    }
+
+    return jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, {
+        expiresIn: '1d'
+    });
+}
+
 async function canRegisterAsAdmin(adminInviteCode) {
     const adminCount = await User.countDocuments({ role: 'admin' });
 
@@ -53,7 +63,7 @@ exports.register = async (req, res) => {
         const selectedRole = role || 'sender';
         const hasAnyLocation = province || district || city;
 
-        if (!['sender', 'agent', 'admin'].includes(selectedRole)) {
+        if (!['sender', 'receiver', 'agent', 'admin'].includes(selectedRole)) {
             return res.status(400).json({ message: 'The selected account role is not allowed.' });
         }
 
@@ -121,9 +131,7 @@ exports.login = async (req, res) => {
             return res.status(400).json({ message: 'Invalid credentials.' });
         }
 
-        const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, {
-            expiresIn: '1d'
-        });
+        const token = createSignedToken(user);
 
         return res.json({
             message: 'Login successful.',

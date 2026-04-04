@@ -17,7 +17,13 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
-const allowedOrigins = (process.env.CLIENT_URL || '*')
+const defaultOrigins = [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:4173',
+    'http://127.0.0.1:4173'
+];
+const allowedOrigins = (process.env.CLIENT_URL || defaultOrigins.join(','))
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
@@ -77,6 +83,13 @@ app.use('/api', (_req, res) => {
 
 app.use((err, _req, res, _next) => {
     console.error('Unhandled server error:', err);
+
+    if (err.message === 'CORS policy blocked this origin.') {
+        return res.status(403).json({
+            message: 'This frontend origin is not allowed by the backend CORS configuration. Update CLIENT_URL in Backend/.env.'
+        });
+    }
+
     res.status(500).json({ message: 'Unexpected server error.' });
 });
 
@@ -134,5 +147,10 @@ server.on('error', (error) => {
 
 server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
+
+    if (!process.env.JWT_SECRET) {
+        console.warn('Warning: JWT_SECRET is missing from Backend/.env. Login and protected routes will fail until it is set.');
+    }
+
     connectDatabase();
 });

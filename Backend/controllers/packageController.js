@@ -55,6 +55,18 @@ function userCanAccessPackage(currentUser, pkg) {
         return String(pkg.assignedAgent?._id) === String(currentUser._id);
     }
 
+    if (currentUser.role === 'receiver') {
+        const receiverEmail = String(pkg.receiverEmail || '').trim().toLowerCase();
+        const receiverPhone = String(pkg.receiverPhone || '').trim();
+        const currentEmail = String(currentUser.email || '').trim().toLowerCase();
+        const currentPhone = String(currentUser.phone || '').trim();
+
+        return Boolean(
+            (receiverEmail && currentEmail && receiverEmail === currentEmail) ||
+            (receiverPhone && currentPhone && receiverPhone === currentPhone)
+        );
+    }
+
     return false;
 }
 
@@ -362,6 +374,74 @@ const getSenderDashboard = async (req, res) => {
     }
 };
 
+const getReceiverPackages = async (req, res) => {
+    try {
+        const receiverEmail = String(req.user.email || '').trim().toLowerCase();
+        const receiverPhone = String(req.user.phone || '').trim();
+        const receiverFilters = [];
+
+        if (receiverEmail) {
+            receiverFilters.push({ receiverEmail });
+        }
+
+        if (receiverPhone) {
+            receiverFilters.push({ receiverPhone });
+        }
+
+        if (receiverFilters.length === 0) {
+            return res.status(200).json({
+                message: 'Receiver account has no matching contact identifier for incoming shipments yet.',
+                data: [],
+                meta: getStatusBreakdown([])
+            });
+        }
+
+        const packages = await Package.find({ $or: receiverFilters }).sort({ updatedAt: -1 }).lean();
+
+        return res.status(200).json({
+            message: 'Incoming shipments loaded successfully.',
+            data: packages,
+            meta: getStatusBreakdown(packages)
+        });
+    } catch (error) {
+        return res.status(500).json({ message: 'Failed to fetch incoming shipments.', error: error.message });
+    }
+};
+
+const getReceiverDashboard = async (req, res) => {
+    try {
+        const receiverEmail = String(req.user.email || '').trim().toLowerCase();
+        const receiverPhone = String(req.user.phone || '').trim();
+        const receiverFilters = [];
+
+        if (receiverEmail) {
+            receiverFilters.push({ receiverEmail });
+        }
+
+        if (receiverPhone) {
+            receiverFilters.push({ receiverPhone });
+        }
+
+        const packages = receiverFilters.length
+            ? await Package.find({ $or: receiverFilters }).sort({ updatedAt: -1 }).lean()
+            : [];
+        const stats = getStatusBreakdown(packages);
+
+        return res.status(200).json({
+            message: 'Receiver dashboard loaded successfully.',
+            data: {
+                stats,
+                incomingPackages: packages.slice(0, 5),
+                activePackages: packages
+                    .filter(pkg => !['Delivered', 'Cancelled'].includes(pkg.status))
+                    .slice(0, 3)
+            }
+        });
+    } catch (error) {
+        return res.status(500).json({ message: 'Failed to load receiver dashboard.', error: error.message });
+    }
+};
+
 const getPublicTracking = async (req, res) => {
     try {
         const trackingNumber = req.params.trackingNumber?.trim();
@@ -390,5 +470,7 @@ module.exports = {
     getPackageById,
     getAgentPackages,
     getSenderDashboard,
+    getReceiverPackages,
+    getReceiverDashboard,
     getPublicTracking
 };
