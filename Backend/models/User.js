@@ -6,9 +6,10 @@ const userSchema = new mongoose.Schema(
         email: { type: String, required: true, unique: true, lowercase: true, trim: true },
         password: { type: String, required: true },
         phone: { type: String, trim: true, default: '' },
-        province: { type: String, trim: true, default: '' },
-        district: { type: String, trim: true, default: '' },
+        address: { type: String, trim: true, default: '' },
         city: { type: String, trim: true, default: '' },
+        state: { type: String, trim: true, default: '' },
+        country: { type: String, trim: true, default: 'United States' },
         role: {
             type: String,
             enum: ['sender', 'agent', 'receiver', 'admin'],
@@ -16,10 +17,20 @@ const userSchema = new mongoose.Schema(
             index: true
         },
         hub: { type: String, trim: true, default: '' },
-        isActive: { type: Boolean, default: true }
+        isActive: { type: Boolean, default: true },
+        isAvailable: { type: Boolean, default: false, index: true },
+        lastSeenAt: { type: Date, default: Date.now }
     },
     { timestamps: true }
 );
+
+userSchema.pre('save', function syncAvailability(next) {
+    if (this.role !== 'agent') {
+        this.isAvailable = false;
+    }
+
+    next();
+});
 
 userSchema.set('toJSON', {
     transform: (_doc, ret) => {

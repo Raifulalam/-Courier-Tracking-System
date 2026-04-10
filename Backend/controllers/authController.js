@@ -1,7 +1,6 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const { isValidLocation } = require('../utils/locationCatalog');
 const { isValidEmail, isValidPhone, normalizeEmail, normalizeText } = require('../utils/validation');
 
 function buildAuthPayload(user) {
@@ -10,12 +9,15 @@ function buildAuthPayload(user) {
         name: user.name,
         email: user.email,
         phone: user.phone,
-        province: user.province,
-        district: user.district,
+        address: user.address,
         city: user.city,
+        state: user.state,
+        country: user.country,
         role: user.role,
         hub: user.hub,
-        isActive: user.isActive
+        isActive: user.isActive,
+        isAvailable: user.isAvailable,
+        lastSeenAt: user.lastSeenAt
     };
 }
 
@@ -41,44 +43,45 @@ async function canRegisterAsAdmin(adminInviteCode) {
 }
 
 exports.register = async (req, res) => {
-    const { name, email, password, role, phone, hub, province, district, city, adminInviteCode } = req.body;
+    const {
+        name,
+        email,
+        password,
+        role = 'sender',
+        phone,
+        address,
+        city,
+        state,
+        country,
+        hub,
+        adminInviteCode
+    } = req.body;
 
     try {
         if (!name || !email || !password) {
             return res.status(400).json({ message: 'Name, email, and password are required.' });
         }
 
+        if (!['admin', 'sender', 'receiver', 'agent'].includes(role)) {
+            return res.status(400).json({ message: 'Invalid account role selected.' });
+        }
+
         if (!isValidEmail(email)) {
-            return res.status(400).json({ message: 'Please provide a valid email address.' });
+            return res.status(400).json({ message: 'Please enter a valid email address.' });
+        }
+
+        if (phone && !isValidPhone(phone)) {
+            return res.status(400).json({ message: 'Please enter a valid phone number.' });
         }
 
         if (String(password).length < 8) {
             return res.status(400).json({ message: 'Password must be at least 8 characters long.' });
         }
 
-        if (phone && !isValidPhone(phone)) {
-            return res.status(400).json({ message: 'Please provide a valid phone number.' });
-        }
-
-        const selectedRole = role || 'sender';
-        const hasAnyLocation = province || district || city;
-
-        if (!['sender', 'receiver', 'agent', 'admin'].includes(selectedRole)) {
-            return res.status(400).json({ message: 'The selected account role is not allowed.' });
-        }
-
-        if (selectedRole === 'admin' && !(await canRegisterAsAdmin(adminInviteCode))) {
+        if (role === 'admin' && !(await canRegisterAsAdmin(adminInviteCode))) {
             return res.status(403).json({
-                message: 'Admin registration requires a valid invite code once an admin account already exists.'
+                message: 'Admin registration requires a valid invite code once an admin already exists.'
             });
-        }
-
-        if (selectedRole === 'sender' && !isValidLocation({ province, district, city })) {
-            return res.status(400).json({ message: 'A valid province, district, and city are required for senders.' });
-        }
-
-        if (selectedRole !== 'sender' && hasAnyLocation && !isValidLocation({ province, district, city })) {
-            return res.status(400).json({ message: 'The selected province, district, and city combination is invalid.' });
         }
 
         const normalizedEmail = normalizeEmail(email);
@@ -92,20 +95,22 @@ exports.register = async (req, res) => {
             name: normalizeText(name),
             email: normalizedEmail,
             password: hashedPassword,
-            role: selectedRole,
             phone: normalizeText(phone),
+            address: normalizeText(address),
+            city: normalizeText(city),
+            state: normalizeText(state),
+            country: normalizeText(country) || 'United States',
             hub: normalizeText(hub),
-            province: normalizeText(province),
-            district: normalizeText(district),
-            city: normalizeText(city)
+            role,
+            isAvailable: role === 'agent' ? false : undefined
         });
 
         return res.status(201).json({
             message: 'Account created successfully.',
             data: buildAuthPayload(newUser)
         });
-    } catch (err) {
-        return res.status(400).json({ message: err.message || 'Registration failed.' });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Registration failed.' });
     }
 };
 
@@ -123,7 +128,7 @@ exports.login = async (req, res) => {
         }
 
         if (!user.isActive) {
-            return res.status(403).json({ message: 'This account has been deactivated. Contact an administrator.' });
+            return res.status(403).json({ message: 'This account is inactive. Please contact an administrator.' });
         }
 
         const isMatch = await bcrypt.compare(password, user.password);
@@ -131,15 +136,16 @@ exports.login = async (req, res) => {
             return res.status(400).json({ message: 'Invalid credentials.' });
         }
 
-        const token = createSignedToken(user);
+        user.lastSeenAt = new Date();
+        await user.save();
 
-        return res.json({
+        return res.status(200).json({
             message: 'Login successful.',
-            token,
+            token: createSignedToken(user),
             user: buildAuthPayload(user)
         });
-    } catch (err) {
-        return res.status(500).json({ message: err.message || 'Login failed.' });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Login failed.' });
     }
 };
 
@@ -151,38 +157,25 @@ exports.getCurrentUser = async (req, res) => {
 };
 
 exports.updateProfile = async (req, res) => {
-    try {
-        const { name, phone, hub, province, district, city } = req.body;
+    const { name, phone, address, city, state, country, hub } = req.body;
 
+    try {
         if (name !== undefined && !normalizeText(name)) {
             return res.status(400).json({ message: 'Name cannot be empty.' });
         }
 
         if (phone && !isValidPhone(phone)) {
-            return res.status(400).json({ message: 'Please provide a valid phone number.' });
-        }
-
-        const nextLocation = {
-            province: province !== undefined ? normalizeText(province) : req.user.province,
-            district: district !== undefined ? normalizeText(district) : req.user.district,
-            city: city !== undefined ? normalizeText(city) : req.user.city
-        };
-
-        const hasLocationInput = province !== undefined || district !== undefined || city !== undefined;
-        if (hasLocationInput && !isValidLocation(nextLocation)) {
-            return res.status(400).json({ message: 'Please select a valid province, district, and city combination.' });
-        }
-
-        if (req.user.role === 'sender' && !isValidLocation(nextLocation)) {
-            return res.status(400).json({ message: 'Sender accounts must keep a valid province, district, and city.' });
+            return res.status(400).json({ message: 'Please enter a valid phone number.' });
         }
 
         if (name !== undefined) req.user.name = normalizeText(name);
         if (phone !== undefined) req.user.phone = normalizeText(phone);
+        if (address !== undefined) req.user.address = normalizeText(address);
+        if (city !== undefined) req.user.city = normalizeText(city);
+        if (state !== undefined) req.user.state = normalizeText(state);
+        if (country !== undefined) req.user.country = normalizeText(country);
         if (hub !== undefined) req.user.hub = normalizeText(hub);
-        if (province !== undefined) req.user.province = nextLocation.province;
-        if (district !== undefined) req.user.district = nextLocation.district;
-        if (city !== undefined) req.user.city = nextLocation.city;
+        req.user.lastSeenAt = new Date();
 
         await req.user.save();
 
@@ -190,7 +183,7 @@ exports.updateProfile = async (req, res) => {
             message: 'Profile updated successfully.',
             data: buildAuthPayload(req.user)
         });
-    } catch (err) {
-        return res.status(500).json({ message: err.message || 'Failed to update profile.' });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to update profile.' });
     }
 };

@@ -4,32 +4,26 @@ const dotenv = require('dotenv');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
-const { getDatabaseStateLabel, requireDatabaseConnection } = require('./middleware/databaseReady');
 
 const authRoutes = require('./routes/authRoutes');
-const packageRoutes = require('./routes/packageRoutes');
+const shipmentRoutes = require('./routes/packageRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const agentRoutes = require('./routes/agentRoutes');
-const locationRoutes = require('./routes/locationRoutes');
-const pricingRoutes = require('./routes/pricingRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
 
 dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
 
-
-// ✅ SIMPLE & SAFE CORS (FIXED)
 app.use(cors({
-    origin: "*",   // allow all (safe for now, restrict later)
-    methods: ["GET", "POST", "PUT", "DELETE"],
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     credentials: true
 }));
-
 app.use(express.json());
 
-
-// ✅ Security headers
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
@@ -37,12 +31,8 @@ app.use((req, res, next) => {
     next();
 });
 
-
-// ✅ Socket.io (FIXED CORS)
 const io = new Server(server, {
-    cors: {
-        origin: "*"
-    }
+    cors: { origin: '*' }
 });
 
 app.set('io', io);
@@ -50,87 +40,68 @@ app.set('io', io);
 io.on('connection', (socket) => {
     socket.emit('system:connected', {
         ok: true,
-        message: 'Realtime channel connected.'
+        message: 'NexExpree realtime channel connected.'
+    });
+
+    socket.on('presence:join', ({ userId, role } = {}) => {
+        if (userId) {
+            socket.join(`user:${userId}`);
+        }
+
+        if (role) {
+            socket.join(`role:${role}`);
+        }
     });
 });
 
-
-// ✅ Health route
-app.get('/api/health', (_req, res) => {
-    res.json({
+app.get('/api/health', async (_req, res) => {
+    res.status(200).json({
         ok: true,
-        service: 'parcel-tracker-backend',
-        databaseState: getDatabaseStateLabel(),
+        service: 'nexexpree-backend',
+        databaseState: mongoose.connection.readyState,
         uptimeSeconds: Math.round(process.uptime()),
         timestamp: new Date().toISOString()
     });
 });
 
-
-// ⚠️ TEMP: Disable DB blocking middleware (important for deployment)
-// Uncomment later if needed
-/*
-app.use((req, res, next) => {
-  if (req.path === '/api/health' || req.path.startsWith('/api/locations')) {
-    return next();
-  }
-  return requireDatabaseConnection(req, res, next);
-});
-*/
-
-
-// ✅ Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/locations', locationRoutes);
-app.use('/api/pricing', pricingRoutes);
-app.use('/api/package', packageRoutes);
+app.use('/api/shipments', shipmentRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/agent', agentRoutes);
+app.use('/api/payments', paymentRoutes);
+app.use('/api/notifications', notificationRoutes);
 
-
-// ✅ 404 handler
 app.use('/api', (_req, res) => {
     res.status(404).json({ message: 'API route not found.' });
 });
 
-
-// ✅ Error handler
 app.use((err, _req, res, _next) => {
     console.error('Server error:', err);
     res.status(500).json({ message: 'Unexpected server error.' });
 });
 
-
-// ✅ PORT FIX (IMPORTANT for Render)
 const PORT = process.env.PORT || 5000;
-
-
-// ✅ MongoDB connection
-const mongoUri = process.env.MONGO_URI;
 
 async function connectDatabase() {
     try {
-        if (!mongoUri) {
-            console.error('❌ MONGO_URI missing');
+        if (!process.env.MONGO_URI) {
+            console.warn('MONGO_URI is missing. The API will start without a database connection.');
             return;
         }
 
-        console.log('Connecting to MongoDB...');
-        await mongoose.connect(mongoUri);
-        console.log('✅ MongoDB connected');
-    } catch (err) {
-        console.error('MongoDB error:', err.message);
+        await mongoose.connect(process.env.MONGO_URI);
+        console.log('MongoDB connected successfully.');
+    } catch (error) {
+        console.error('MongoDB connection error:', error.message);
         setTimeout(connectDatabase, 10000);
     }
 }
 
-
-// ✅ Start server
 server.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`NexExpree API running on port ${PORT}`);
 
     if (!process.env.JWT_SECRET) {
-        console.warn('⚠️ JWT_SECRET missing');
+        console.warn('JWT_SECRET is missing. Auth will not work until it is configured.');
     }
 
     connectDatabase();

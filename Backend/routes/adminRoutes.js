@@ -3,15 +3,15 @@ const { verifyToken, checkRole } = require('../middleware/authMiddleware');
 const {
     getAllUsers,
     getAllPackages,
-    deletePackage,
-    assignAgentToPackage
+    assignAgentToPackage,
+    getAgents
 } = require('../controllers/adminController');
 
 const router = express.Router();
 
 router.get('/users', verifyToken, checkRole(['admin']), getAllUsers);
 router.get('/packages', verifyToken, checkRole(['admin']), getAllPackages);
-router.delete('/package/:id', verifyToken, checkRole(['admin']), deletePackage);
-router.put('/assign/:packageId', verifyToken, checkRole(['admin']), assignAgentToPackage);
+router.get('/agents', verifyToken, checkRole(['admin']), getAgents);
+router.put('/shipments/:packageId/assign', verifyToken, checkRole(['admin']), assignAgentToPackage);
 
 module.exports = router;

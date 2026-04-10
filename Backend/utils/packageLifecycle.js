@@ -1,81 +1,78 @@
-const PACKAGE_STATUSES = [
-    'Requested',
-    'Approved',
-    'Scheduled',
+const SHIPMENT_STATUSES = [
+    'Pending',
     'Assigned',
     'Picked Up',
     'In Transit',
     'Out for Delivery',
     'Delivered',
-    'Delayed',
-    'Exception',
     'Cancelled'
 ];
 
-const ADMIN_STATUS_OPTIONS = [
-    'Approved',
-    'Scheduled',
-    'Assigned',
-    'Delayed',
-    'Exception',
-    'Cancelled',
-    'Delivered'
-];
+const PAYMENT_STATUSES = ['Paid', 'Unpaid', 'Failed'];
+const DELIVERY_VERIFICATION_METHODS = ['otp', 'qr'];
 
-const AGENT_STATUS_OPTIONS = [
+const ADMIN_STATUS_OPTIONS = [
+    'Pending',
+    'Assigned',
     'Picked Up',
     'In Transit',
     'Out for Delivery',
     'Delivered',
-    'Delayed',
-    'Exception'
+    'Cancelled'
 ];
 
+const AGENT_STATUS_OPTIONS = ['Picked Up', 'In Transit', 'Out for Delivery'];
+
 const STATUS_TRANSITIONS = {
-    Requested: ['Approved', 'Cancelled'],
-    Approved: ['Scheduled', 'Assigned', 'Cancelled'],
-    Scheduled: ['Assigned', 'Picked Up', 'Cancelled'],
-    Assigned: ['Picked Up', 'Delayed', 'Exception', 'Cancelled'],
-    'Picked Up': ['In Transit', 'Delayed', 'Exception'],
-    'In Transit': ['Out for Delivery', 'Delayed', 'Exception'],
-    'Out for Delivery': ['Delivered', 'Delayed', 'Exception'],
-    Delayed: ['In Transit', 'Out for Delivery', 'Delivered', 'Exception', 'Cancelled'],
-    Exception: ['In Transit', 'Out for Delivery', 'Cancelled'],
+    Pending: ['Assigned', 'Cancelled'],
+    Assigned: ['Picked Up', 'Cancelled'],
+    'Picked Up': ['In Transit', 'Cancelled'],
+    'In Transit': ['Out for Delivery', 'Cancelled'],
+    'Out for Delivery': ['Delivered', 'Cancelled'],
     Delivered: [],
     Cancelled: []
 };
 
 const STATUS_LABELS = {
-    Requested: 'Order requested',
-    Approved: 'Order approved',
-    Scheduled: 'Pickup scheduled',
-    Assigned: 'Courier assigned',
-    'Picked Up': 'Parcel picked up',
-    'In Transit': 'In transit',
-    'Out for Delivery': 'Out for delivery',
-    Delivered: 'Delivered successfully',
-    Delayed: 'Delayed',
-    Exception: 'Delivery exception',
-    Cancelled: 'Cancelled'
+    Pending: 'Shipment booked and waiting for assignment',
+    Assigned: 'Delivery agent assigned',
+    'Picked Up': 'Package picked up from sender',
+    'In Transit': 'Shipment is moving through the network',
+    'Out for Delivery': 'Agent is heading to the receiver',
+    Delivered: 'Delivery completed and verified',
+    Cancelled: 'Shipment cancelled'
 };
 
 function generateTrackingNumber() {
     const now = new Date();
     const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
-    const random = Math.random().toString(36).slice(2, 8).toUpperCase();
-    return `PTR-${stamp}-${random}`;
+    const random = Math.random().toString(36).slice(2, 10).toUpperCase();
+    return `NEX-${stamp}-${random}`;
 }
 
-function getEstimatedDeliveryAt(serviceLevel, createdAt = new Date()) {
-    const scheduled = new Date(createdAt);
+function getEstimatedDeliveryAt(serviceLevel = 'standard', createdAt = new Date()) {
+    const estimated = new Date(createdAt);
     const hoursByService = {
-        sameDay: 8,
+        standard: 72,
         express: 24,
-        normal: 72
+        'same-day': 8
     };
 
-    scheduled.setHours(scheduled.getHours() + (hoursByService[serviceLevel] || hoursByService.normal));
-    return scheduled;
+    estimated.setHours(estimated.getHours() + (hoursByService[serviceLevel] || hoursByService.standard));
+    return estimated;
+}
+
+function calculateShippingFee(weight = 0, serviceLevel = 'standard') {
+    const parsedWeight = Math.max(Number(weight) || 0, 0);
+    const baseByService = {
+        standard: 12,
+        express: 18,
+        'same-day': 24
+    };
+
+    const base = baseByService[serviceLevel] || baseByService.standard;
+    const weightCharge = Math.max(parsedWeight, 1) * 2.75;
+    return Number((base + weightCharge).toFixed(2));
 }
 
 function isTransitionAllowed(currentStatus, nextStatus) {
@@ -89,8 +86,11 @@ function isTransitionAllowed(currentStatus, nextStatus) {
 module.exports = {
     ADMIN_STATUS_OPTIONS,
     AGENT_STATUS_OPTIONS,
-    PACKAGE_STATUSES,
+    DELIVERY_VERIFICATION_METHODS,
+    PAYMENT_STATUSES,
+    SHIPMENT_STATUSES,
     STATUS_LABELS,
+    calculateShippingFee,
     generateTrackingNumber,
     getEstimatedDeliveryAt,
     isTransitionAllowed

@@ -1,7 +1,9 @@
 const mongoose = require('mongoose');
 const {
-    PACKAGE_STATUSES,
+    PAYMENT_STATUSES,
+    SHIPMENT_STATUSES,
     STATUS_LABELS,
+    calculateShippingFee,
     generateTrackingNumber,
     getEstimatedDeliveryAt
 } = require('../utils/packageLifecycle');
@@ -9,20 +11,30 @@ const {
 const actorSchema = new mongoose.Schema(
     {
         _id: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-        name: { type: String, trim: true },
-        role: { type: String, trim: true }
+        name: { type: String, trim: true, default: '' },
+        role: { type: String, trim: true, default: '' }
+    },
+    { _id: false }
+);
+
+const personSchema = new mongoose.Schema(
+    {
+        name: { type: String, required: true, trim: true },
+        email: { type: String, trim: true, lowercase: true, default: '' },
+        phone: { type: String, trim: true, default: '' },
+        address: { type: String, required: true, trim: true }
     },
     { _id: false }
 );
 
 const statusUpdateSchema = new mongoose.Schema(
     {
-        status: { type: String, enum: PACKAGE_STATUSES, required: true },
-        label: { type: String, trim: true },
+        status: { type: String, enum: SHIPMENT_STATUSES, required: true },
+        label: { type: String, trim: true, default: '' },
         note: { type: String, trim: true, default: '' },
         location: { type: String, trim: true, default: '' },
         timestamp: { type: Date, default: Date.now },
-        actor: actorSchema
+        actor: { type: actorSchema, default: () => ({}) }
     },
     { _id: false }
 );
@@ -30,118 +42,80 @@ const statusUpdateSchema = new mongoose.Schema(
 const assignedAgentSchema = new mongoose.Schema(
     {
         _id: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-        name: { type: String, trim: true },
-        phone: { type: String, trim: true },
-        email: { type: String, trim: true }
+        name: { type: String, trim: true, default: '' },
+        email: { type: String, trim: true, default: '' },
+        phone: { type: String, trim: true, default: '' },
+        isAvailable: { type: Boolean, default: false }
     },
     { _id: false }
 );
 
-const dimensionsSchema = new mongoose.Schema(
+const shipmentSchema = new mongoose.Schema(
     {
-        length: { type: Number, default: 0, min: 0 },
-        width: { type: Number, default: 0, min: 0 },
-        height: { type: Number, default: 0, min: 0 }
-    },
-    { _id: false }
-);
-
-const locationSchema = new mongoose.Schema(
-    {
-        province: { type: String, required: true, trim: true },
-        district: { type: String, required: true, trim: true },
-        city: { type: String, required: true, trim: true }
-    },
-    { _id: false }
-);
-
-const pricingSnapshotSchema = new mongoose.Schema(
-    {
-        routeType: {
-            type: String,
-            enum: ['sameCity', 'sameDistrict', 'sameProvince', 'differentProvince'],
-            required: true
-        },
-        basePrice: { type: Number, required: true, min: 0 },
-        weight: { type: Number, required: true, min: 0 },
-        weightCharge: { type: Number, required: true, min: 0 },
-        perKgRate: { type: Number, required: true, min: 0 },
-        deliveryMultiplier: { type: Number, required: true, min: 1 },
-        codCharge: { type: Number, required: true, min: 0 },
-        totalPrice: { type: Number, required: true, min: 0 }
-    },
-    { _id: false }
-);
-
-const packageSchema = new mongoose.Schema(
-    {
-        trackingNumber: {
+        trackingId: {
             type: String,
             required: true,
             unique: true,
             index: true,
             default: generateTrackingNumber
         },
-        senderId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-        senderSnapshot: {
-            name: { type: String, trim: true, default: '' },
-            email: { type: String, trim: true, default: '' },
-            phone: { type: String, trim: true, default: '' }
+        senderUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+        receiverUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+        sender: { type: personSchema, required: true },
+        receiver: { type: personSchema, required: true },
+        packageType: { type: String, required: true, trim: true },
+        weight: { type: Number, required: true, min: 0.1 },
+        serviceLevel: {
+            type: String,
+            enum: ['standard', 'express', 'same-day'],
+            default: 'standard'
         },
-        receiverName: { type: String, required: true, trim: true },
-        receiverPhone: { type: String, required: true, trim: true },
-        receiverEmail: { type: String, trim: true, lowercase: true, default: '' },
-        senderLocation: { type: locationSchema, default: null },
-        receiverLocation: { type: locationSchema, default: null },
         pickupAddress: { type: String, required: true, trim: true },
         deliveryAddress: { type: String, required: true, trim: true },
-        itemType: { type: String, required: true, trim: true },
-        parcelCategory: { type: String, trim: true, default: 'Parcel' },
-        weight: { type: Number, required: true, min: 0 },
-        dimensions: { type: dimensionsSchema, default: () => ({}) },
-        declaredValue: { type: Number, default: 0, min: 0 },
-        instructions: { type: String, trim: true, default: '' },
-        deliveryType: { type: String, enum: ['normal', 'express', 'sameDay'], default: 'normal' },
-        priority: { type: String, enum: ['standard', 'priority', 'critical'], default: 'standard' },
-        paymentMode: { type: String, enum: ['prepaid', 'cod'], default: 'prepaid' },
-        codAmount: { type: Number, default: 0, min: 0 },
-        shippingCharge: { type: Number, min: 0, default: 0 },
-        pricingSnapshot: { type: pricingSnapshotSchema, default: null },
-        scheduledPickupAt: { type: Date, default: null },
-        estimatedDeliveryAt: { type: Date, default: null },
+        notes: { type: String, trim: true, default: '' },
+        status: { type: String, enum: SHIPMENT_STATUSES, default: 'Pending', index: true },
+        assignedAgent: { type: assignedAgentSchema, default: null },
+        paymentStatus: { type: String, enum: PAYMENT_STATUSES, default: 'Unpaid', index: true },
+        paymentAmount: { type: Number, min: 0, default: 0 },
+        currency: { type: String, trim: true, default: 'USD' },
+        otpHash: { type: String, trim: true, default: '' },
+        otpExpiresAt: { type: Date, default: null },
+        qrToken: { type: String, trim: true, default: '' },
+        qrTokenHash: { type: String, trim: true, default: '' },
+        qrExpiresAt: { type: Date, default: null },
+        verificationMethod: { type: String, enum: ['otp', 'qr', ''], default: '' },
+        receiverConfirmedAt: { type: Date, default: null },
+        deliveryConfirmedBy: { type: actorSchema, default: null },
+        outForDeliveryAt: { type: Date, default: null },
         deliveredAt: { type: Date, default: null },
-        status: { type: String, enum: PACKAGE_STATUSES, default: 'Requested', index: true },
-        currentStatus: { type: String, enum: PACKAGE_STATUSES, default: 'Requested', index: true },
-        statusUpdates: {
+        estimatedDeliveryAt: { type: Date, default: null },
+        timeline: {
             type: [statusUpdateSchema],
-            default: () => [{ status: 'Requested', label: STATUS_LABELS.Requested }]
-        },
-        assignedAgent: { type: assignedAgentSchema, default: null }
+            default: () => [{ status: 'Pending', label: STATUS_LABELS.Pending, note: 'Shipment created.' }]
+        }
     },
     { timestamps: true }
 );
 
-packageSchema.index({ 'assignedAgent._id': 1, status: 1 });
-packageSchema.index({ senderId: 1, updatedAt: -1 });
-packageSchema.index({ status: 1, updatedAt: -1 });
-packageSchema.index({ currentStatus: 1, updatedAt: -1 });
+shipmentSchema.index({ 'assignedAgent._id': 1, status: 1 });
+shipmentSchema.index({ senderUser: 1, updatedAt: -1 });
+shipmentSchema.index({ receiverUser: 1, updatedAt: -1 });
+shipmentSchema.index({ status: 1, createdAt: -1 });
 
-packageSchema.pre('validate', function syncProfessionalDefaults(next) {
-    if (!this.status) {
-        this.status = 'Requested';
-    }
-
-    this.currentStatus = this.status;
-
+shipmentSchema.pre('validate', function syncShipmentDefaults(next) {
     if (!this.estimatedDeliveryAt) {
-        this.estimatedDeliveryAt = getEstimatedDeliveryAt(this.deliveryType, this.createdAt || new Date());
+        this.estimatedDeliveryAt = getEstimatedDeliveryAt(this.serviceLevel, this.createdAt || new Date());
     }
 
-    if (!this.statusUpdates || this.statusUpdates.length === 0) {
-        this.statusUpdates = [{ status: this.status, label: STATUS_LABELS[this.status] }];
+    if (!this.paymentAmount) {
+        this.paymentAmount = calculateShippingFee(this.weight, this.serviceLevel);
+    }
+
+    if (!this.timeline || this.timeline.length === 0) {
+        this.timeline = [{ status: this.status, label: STATUS_LABELS[this.status], note: 'Shipment created.' }];
     }
 
     next();
 });
 
-module.exports = mongoose.model('Package', packageSchema);
+module.exports = mongoose.models.Package || mongoose.model('Package', shipmentSchema, 'shipments');

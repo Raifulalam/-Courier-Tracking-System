@@ -1,45 +1,46 @@
+const DeliveryLog = require('../models/DeliveryLog');
 const Package = require('../models/Package');
+const Payment = require('../models/Payment');
+const User = require('../models/User');
 const {
-    ADMIN_STATUS_OPTIONS,
     AGENT_STATUS_OPTIONS,
+    ADMIN_STATUS_OPTIONS,
     STATUS_LABELS,
+    calculateShippingFee,
     getEstimatedDeliveryAt,
     isTransitionAllowed
 } = require('../utils/packageLifecycle');
-const { formatLocationLabel, isValidLocation } = require('../utils/locationCatalog');
-const { calculateDeliveryPrice, getPricingSettings } = require('../utils/pricingEngine');
-const { isNonNegativeNumber, isPositiveNumber, isValidEmail, isValidPhone, normalizeText } = require('../utils/validation');
+const { generateOtpCode, generateToken, hashValue, isHashMatch } = require('../utils/security');
+const {
+    appendShipmentLog,
+    buildActor,
+    createNotificationsForUsers,
+    emitNotificationEvents,
+    emitShipmentUpdate,
+    notifyRole
+} = require('../utils/shipmentEvents');
+const { isPositiveNumber, isValidEmail, isValidPhone, normalizeEmail, normalizeText } = require('../utils/validation');
 
-function buildActor(user) {
-    return {
-        _id: user._id,
-        name: user.name,
-        role: user.role
-    };
-}
-
-function buildStatusUpdate(status, user, note = '', location = '') {
-    return {
-        status,
-        label: STATUS_LABELS[status] || status,
-        note: note?.trim() || '',
-        location: location?.trim() || '',
-        actor: buildActor(user),
-        timestamp: new Date()
-    };
-}
-
-function emitPackageEvent(req, eventName, payload) {
-    const io = req.app.get('io');
-
-    if (io) {
-        io.emit(eventName, payload);
-        io.emit('dashboard:refresh', { event: eventName, packageId: payload?._id || payload?.packageId });
+function isReceiverLinked(currentUser, shipment) {
+    if (!currentUser || !shipment) {
+        return false;
     }
+
+    if (shipment.receiverUser && String(shipment.receiverUser) === String(currentUser._id)) {
+        return true;
+    }
+
+    const shipmentEmail = normalizeEmail(shipment.receiver?.email);
+    const shipmentPhone = normalizeText(shipment.receiver?.phone);
+
+    return Boolean(
+        (shipmentEmail && shipmentEmail === normalizeEmail(currentUser.email)) ||
+        (shipmentPhone && shipmentPhone === normalizeText(currentUser.phone))
+    );
 }
 
-function userCanAccessPackage(currentUser, pkg) {
-    if (!currentUser || !pkg) {
+function userCanAccessShipment(currentUser, shipment) {
+    if (!currentUser || !shipment) {
         return false;
     }
 
@@ -48,107 +49,174 @@ function userCanAccessPackage(currentUser, pkg) {
     }
 
     if (currentUser.role === 'sender') {
-        return String(pkg.senderId) === String(currentUser._id);
+        return String(shipment.senderUser) === String(currentUser._id);
     }
 
     if (currentUser.role === 'agent') {
-        return String(pkg.assignedAgent?._id) === String(currentUser._id);
+        return String(shipment.assignedAgent?._id) === String(currentUser._id);
     }
 
     if (currentUser.role === 'receiver') {
-        const receiverEmail = String(pkg.receiverEmail || '').trim().toLowerCase();
-        const receiverPhone = String(pkg.receiverPhone || '').trim();
-        const currentEmail = String(currentUser.email || '').trim().toLowerCase();
-        const currentPhone = String(currentUser.phone || '').trim();
-
-        return Boolean(
-            (receiverEmail && currentEmail && receiverEmail === currentEmail) ||
-            (receiverPhone && currentPhone && receiverPhone === currentPhone)
-        );
+        return isReceiverLinked(currentUser, shipment);
     }
 
     return false;
 }
 
-function mapPackageForPublicTracking(pkg) {
-    return {
-        _id: pkg._id,
-        trackingNumber: pkg.trackingNumber,
-        receiverName: pkg.receiverName,
-        pickupAddress: pkg.pickupAddress,
-        deliveryAddress: pkg.deliveryAddress,
-        itemType: pkg.itemType,
-        status: pkg.status,
-        currentStatus: pkg.currentStatus,
-        shippingCharge: pkg.shippingCharge,
-        pricingSnapshot: pkg.pricingSnapshot,
-        estimatedDeliveryAt: pkg.estimatedDeliveryAt,
-        deliveredAt: pkg.deliveredAt,
-        assignedAgent: pkg.assignedAgent
-            ? {
-                name: pkg.assignedAgent.name,
-                phone: pkg.assignedAgent.phone
+function summarizeShipments(shipments = []) {
+    return shipments.reduce(
+        (acc, shipment) => {
+            acc.total += 1;
+
+            if (shipment.status === 'Pending') {
+                acc.pending += 1;
             }
-            : null,
-        statusUpdates: pkg.statusUpdates
-    };
+
+            if (shipment.status === 'Assigned') {
+                acc.assigned += 1;
+            }
+
+            if (['Picked Up', 'In Transit', 'Out for Delivery'].includes(shipment.status)) {
+                acc.inTransit += 1;
+            }
+
+            if (shipment.status === 'Delivered') {
+                acc.delivered += 1;
+            }
+
+            if (shipment.status === 'Cancelled') {
+                acc.cancelled += 1;
+            }
+
+            if (shipment.paymentStatus === 'Unpaid') {
+                acc.unpaid += 1;
+            }
+
+            return acc;
+        },
+        { total: 0, pending: 0, assigned: 0, inTransit: 0, delivered: 0, cancelled: 0, unpaid: 0 }
+    );
 }
 
 function escapeRegex(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function getStatusBreakdown(packages) {
-    return packages.reduce(
-        (acc, pkg) => {
-            acc.total += 1;
+function sanitizeShipment(shipment, currentUser) {
+    const data = shipment.toObject ? shipment.toObject() : { ...shipment };
 
-            if (['Requested', 'Approved', 'Scheduled'].includes(pkg.status)) {
-                acc.pending += 1;
-            }
+    delete data.otpHash;
+    delete data.qrTokenHash;
 
-            if (['Assigned', 'Picked Up', 'In Transit', 'Out for Delivery', 'Delayed', 'Exception'].includes(pkg.status)) {
-                acc.active += 1;
-            }
+    const canSeeQr = ['admin', 'agent'].includes(currentUser?.role) || isReceiverLinked(currentUser, shipment);
+    if (!canSeeQr) {
+        delete data.qrToken;
+    }
 
-            if (pkg.status === 'Delivered') {
-                acc.delivered += 1;
-            }
+    if (currentUser?.role !== 'receiver') {
+        delete data.deliveryOtp;
+    }
 
-            if (pkg.status === 'Cancelled') {
-                acc.cancelled += 1;
-            }
-
-            return acc;
-        },
-        { total: 0, pending: 0, active: 0, delivered: 0, cancelled: 0 }
-    );
+    return data;
 }
 
-const createPackage = async (req, res) => {
-    try {
-        const {
-            receiverName,
-            receiverPhone,
-            receiverEmail,
-            itemType,
-            parcelCategory,
-            weight,
-            instructions,
-            deliveryType,
-            priority,
-            paymentMode,
-            codAmount,
-            declaredValue,
-            scheduledPickupAt,
-            dimensions,
-            province,
-            district,
-            city
-        } = req.body;
+async function syncInitialPayment(shipment) {
+    await Payment.create({
+        shipmentId: shipment._id,
+        trackingId: shipment.trackingId,
+        amount: shipment.paymentAmount,
+        currency: shipment.currency,
+        method: 'pending',
+        status: shipment.paymentStatus,
+        note: 'Shipment created. Waiting for payment.'
+    });
+}
 
-        if (!receiverName || !receiverPhone || !itemType || !weight) {
-            return res.status(400).json({ message: 'Receiver, item, and weight details are required.' });
+async function linkReceiverUser({ receiverEmail, receiverPhone }) {
+    const filters = [];
+
+    if (receiverEmail) {
+        filters.push({ email: normalizeEmail(receiverEmail), role: 'receiver' });
+    }
+
+    if (receiverPhone) {
+        filters.push({ phone: normalizeText(receiverPhone), role: 'receiver' });
+    }
+
+    if (!filters.length) {
+        return null;
+    }
+
+    return User.findOne({ $or: filters, isActive: true }).select('_id role').lean();
+}
+
+async function createStakeholderNotifications(req, shipment, message, type, metadata = {}) {
+    const recipients = [
+        shipment.senderUser,
+        shipment.receiverUser,
+        shipment.assignedAgent?._id
+    ].filter(Boolean);
+
+    const notifications = await createNotificationsForUsers({
+        userIds: recipients,
+        type,
+        title: `Shipment ${shipment.trackingId}`,
+        message,
+        shipment,
+        metadata
+    });
+
+    const adminNotifications = await notifyRole({
+        role: 'admin',
+        type,
+        title: `Shipment ${shipment.trackingId}`,
+        message,
+        shipment,
+        metadata
+    });
+
+    emitNotificationEvents(req, [...notifications, ...adminNotifications]);
+}
+
+async function createInitialDeliveryLog(shipment) {
+    const firstEvent = shipment.timeline?.[0];
+    if (!firstEvent) {
+        return;
+    }
+
+    await DeliveryLog.create({
+        shipmentId: shipment._id,
+        trackingId: shipment.trackingId,
+        status: firstEvent.status,
+        label: firstEvent.label,
+        note: firstEvent.note,
+        location: firstEvent.location,
+        actor: firstEvent.actor,
+        eventAt: firstEvent.timestamp
+    });
+}
+
+exports.createPackage = async (req, res) => {
+    const {
+        senderName,
+        senderPhone,
+        senderEmail,
+        receiverName,
+        receiverPhone,
+        receiverEmail,
+        packageType,
+        weight,
+        pickupAddress,
+        deliveryAddress,
+        notes,
+        serviceLevel = 'standard'
+    } = req.body;
+
+    try {
+        if (!receiverName || !receiverPhone || !packageType || !weight || !pickupAddress || !deliveryAddress) {
+            return res.status(400).json({
+                message: 'Receiver details, package type, weight, pickup address, and delivery address are required.'
+            });
         }
 
         if (!isValidPhone(receiverPhone)) {
@@ -159,117 +227,93 @@ const createPackage = async (req, res) => {
             return res.status(400).json({ message: 'Please provide a valid receiver email address.' });
         }
 
-        const senderLocation = {
-            province: req.user.province,
-            district: req.user.district,
-            city: req.user.city
-        };
-        const receiverLocation = { province, district, city };
-        const normalizedWeight = Number(weight);
-
-        if (!isValidLocation(senderLocation)) {
-            return res.status(400).json({
-                message: 'Your sender profile is missing a valid province, district, and city.'
-            });
+        if (senderPhone && !isValidPhone(senderPhone)) {
+            return res.status(400).json({ message: 'Please provide a valid sender phone number.' });
         }
 
-        if (!isValidLocation(receiverLocation)) {
-            return res.status(400).json({
-                message: 'Receiver destination must include a valid province, district, and city.'
-            });
+        if (senderEmail && !isValidEmail(senderEmail)) {
+            return res.status(400).json({ message: 'Please provide a valid sender email address.' });
         }
 
         if (!isPositiveNumber(weight)) {
             return res.status(400).json({ message: 'Weight must be greater than zero.' });
         }
 
-        if (paymentMode === 'cod' && !isPositiveNumber(codAmount)) {
-            return res.status(400).json({ message: 'COD shipments must include a positive COD amount.' });
-        }
-
-        if (declaredValue && !isNonNegativeNumber(declaredValue)) {
-            return res.status(400).json({ message: 'Declared value must be a non-negative number.' });
-        }
-
-        if (scheduledPickupAt && Number.isNaN(new Date(scheduledPickupAt).getTime())) {
-            return res.status(400).json({ message: 'Scheduled pickup time is invalid.' });
-        }
-
-        const pricing = await getPricingSettings();
-        const pricingSnapshot = calculateDeliveryPrice({
-            senderLocation,
-            receiverLocation,
-            weight: normalizedWeight,
-            deliveryType,
-            paymentMode,
-            pricing
-        });
-        const pickupAddress = formatLocationLabel(senderLocation);
-        const deliveryAddress = formatLocationLabel(receiverLocation);
-
-        const packageDocument = await Package.create({
-            senderId: req.user._id,
-            senderSnapshot: {
-                name: req.user.name,
-                email: req.user.email,
-                phone: req.user.phone
+        const receiverUser = await linkReceiverUser({ receiverEmail, receiverPhone });
+        const shipment = await Package.create({
+            senderUser: req.user._id,
+            receiverUser: receiverUser?._id || null,
+            sender: {
+                name: normalizeText(senderName) || req.user.name,
+                email: normalizeEmail(senderEmail) || req.user.email,
+                phone: normalizeText(senderPhone) || req.user.phone,
+                address: normalizeText(pickupAddress)
             },
-            receiverName: normalizeText(receiverName),
-            receiverPhone: normalizeText(receiverPhone),
-            receiverEmail: normalizeText(receiverEmail),
-            senderLocation,
-            receiverLocation,
-            pickupAddress,
-            deliveryAddress,
-            itemType: normalizeText(itemType),
-            parcelCategory: normalizeText(parcelCategory) || 'Parcel',
-            weight: normalizedWeight,
-            instructions: normalizeText(instructions),
-            deliveryType,
-            priority,
-            paymentMode,
-            codAmount: Number(codAmount || 0),
-            declaredValue: Number(declaredValue || 0),
-            shippingCharge: pricingSnapshot.totalPrice,
-            pricingSnapshot,
-            scheduledPickupAt: scheduledPickupAt || null,
-            estimatedDeliveryAt: getEstimatedDeliveryAt(deliveryType, scheduledPickupAt || new Date()),
-            dimensions: {
-                length: Number(dimensions?.length || 0),
-                width: Number(dimensions?.width || 0),
-                height: Number(dimensions?.height || 0)
+            receiver: {
+                name: normalizeText(receiverName),
+                email: normalizeEmail(receiverEmail),
+                phone: normalizeText(receiverPhone),
+                address: normalizeText(deliveryAddress)
             },
-            status: 'Requested',
-            currentStatus: 'Requested',
-            statusUpdates: [buildStatusUpdate('Requested', req.user, 'Shipment request created.', pickupAddress)]
+            packageType: normalizeText(packageType),
+            weight: Number(weight),
+            serviceLevel,
+            pickupAddress: normalizeText(pickupAddress),
+            deliveryAddress: normalizeText(deliveryAddress),
+            notes: normalizeText(notes),
+            paymentStatus: 'Unpaid',
+            paymentAmount: calculateShippingFee(weight, serviceLevel),
+            estimatedDeliveryAt: getEstimatedDeliveryAt(serviceLevel)
         });
 
-        emitPackageEvent(req, 'package:created', packageDocument);
+        shipment.timeline[0].actor = buildActor(req.user);
+        shipment.timeline[0].location = shipment.pickupAddress;
+        shipment.timeline[0].note = 'Shipment created by sender.';
+        await shipment.save();
+
+        await Promise.all([
+            createInitialDeliveryLog(shipment),
+            syncInitialPayment(shipment),
+            createStakeholderNotifications(
+                req,
+                shipment,
+                'A new shipment has been created and is waiting for assignment.',
+                'shipment.created'
+            )
+        ]);
+
+        emitShipmentUpdate(req, shipment, { kind: 'created' });
 
         return res.status(201).json({
             message: 'Shipment created successfully.',
-            data: packageDocument
+            data: sanitizeShipment(shipment, req.user)
         });
-    } catch (err) {
-        return res.status(500).json({ message: 'Server error while creating shipment.', error: err.message });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to create shipment.' });
     }
 };
 
-const updateStatus = async (req, res) => {
-    try {
-        const { packageId } = req.params;
-        const { status, note, location } = req.body;
+exports.updateStatus = async (req, res) => {
+    const { packageId } = req.params;
+    const { status, note = '', location = '' } = req.body;
 
+    try {
         if (!status) {
-            return res.status(400).json({ message: 'A status value is required.' });
+            return res.status(400).json({ message: 'A shipment status is required.' });
         }
 
-        const pkg = await Package.findById(packageId);
-        if (!pkg) {
+        if (status === 'Delivered') {
+            return res.status(400).json({
+                message: 'Use the delivery verification endpoint to complete delivery with OTP or QR verification.'
+            });
+        }
+
+        const shipment = await Package.findById(packageId);
+        if (!shipment) {
             return res.status(404).json({ message: 'Shipment not found.' });
         }
 
-        if (req.user.role === 'agent' && String(pkg.assignedAgent?._id) !== String(req.user._id)) {
+        if (req.user.role === 'agent' && String(shipment.assignedAgent?._id) !== String(req.user._id)) {
             return res.status(403).json({ message: 'You can only update shipments assigned to you.' });
         }
 
@@ -278,199 +322,295 @@ const updateStatus = async (req, res) => {
             return res.status(400).json({ message: `Status "${status}" is not allowed for your role.` });
         }
 
-        if (!isTransitionAllowed(pkg.status, status) && req.user.role !== 'admin') {
-            return res.status(400).json({ message: `Cannot move shipment from ${pkg.status} to ${status}.` });
+        if (!isTransitionAllowed(shipment.status, status) && req.user.role !== 'admin') {
+            return res.status(400).json({
+                message: `Cannot move shipment from ${shipment.status} to ${status}.`
+            });
         }
 
-        pkg.status = status;
-        pkg.currentStatus = status;
+        shipment.status = status;
 
-        if (status === 'Delivered') {
-            pkg.deliveredAt = new Date();
-        } else if (pkg.deliveredAt) {
-            pkg.deliveredAt = null;
+        if (status === 'Out for Delivery') {
+            const otpCode = generateOtpCode();
+            const qrToken = `NEXQR-${shipment.trackingId}-${generateToken(6)}`;
+            const expiresAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
+
+            shipment.otpHash = hashValue(otpCode);
+            shipment.otpExpiresAt = expiresAt;
+            shipment.qrToken = qrToken;
+            shipment.qrTokenHash = hashValue(qrToken);
+            shipment.qrExpiresAt = expiresAt;
+            shipment.outForDeliveryAt = new Date();
+
+            await createStakeholderNotifications(
+                req,
+                shipment,
+                shipment.paymentStatus === 'Paid'
+                    ? 'Shipment is out for delivery. Use the OTP or QR token to verify the final handoff.'
+                    : 'Shipment is out for delivery, but payment is still pending before final confirmation.',
+                'shipment.out_for_delivery',
+                {
+                    otpCode,
+                    qrToken,
+                    expiresAt,
+                    paymentStatus: shipment.paymentStatus
+                }
+            );
         }
 
-        pkg.statusUpdates.push(buildStatusUpdate(status, req.user, note, location || pkg.deliveryAddress));
-        await pkg.save();
+        await appendShipmentLog(
+            shipment,
+            status,
+            req.user,
+            normalizeText(note) || STATUS_LABELS[status],
+            normalizeText(location) || (status === 'Picked Up' ? shipment.pickupAddress : shipment.deliveryAddress)
+        );
 
-        emitPackageEvent(req, 'package:updated', pkg);
+        await shipment.save();
+        emitShipmentUpdate(req, shipment, { kind: 'status', status });
 
         return res.status(200).json({
             message: 'Shipment status updated successfully.',
-            data: pkg
+            data: sanitizeShipment(shipment, req.user)
         });
     } catch (error) {
-        return res.status(500).json({ message: 'Error updating shipment status.', error: error.message });
+        return res.status(500).json({ message: error.message || 'Failed to update shipment status.' });
     }
 };
 
-const getUserPackages = async (req, res) => {
+exports.verifyDelivery = async (req, res) => {
+    const { packageId } = req.params;
+    const { otp = '', qrToken = '' } = req.body;
+
     try {
-        const packages = await Package.find({ senderId: req.user._id }).sort({ updatedAt: -1 }).lean();
-
-        return res.status(200).json({
-            message: packages.length ? 'Shipments retrieved successfully.' : 'No shipments found for this sender.',
-            data: packages,
-            meta: getStatusBreakdown(packages)
-        });
-    } catch (error) {
-        return res.status(500).json({ message: 'Error fetching shipments.', error: error.message });
-    }
-};
-
-const getPackageById = async (req, res) => {
-    try {
-        const pkg = await Package.findById(req.params.id).lean();
-
-        if (!pkg) {
+        const shipment = await Package.findById(packageId);
+        if (!shipment) {
             return res.status(404).json({ message: 'Shipment not found.' });
         }
 
-        if (!userCanAccessPackage(req.user, pkg)) {
-            return res.status(403).json({ message: 'You are not allowed to access this shipment.' });
+        if (!userCanAccessShipment(req.user, shipment)) {
+            return res.status(403).json({ message: 'You are not allowed to verify this shipment.' });
         }
 
-        return res.json({
-            message: 'Shipment retrieved successfully.',
-            data: pkg
-        });
-    } catch (err) {
-        return res.status(500).json({ message: 'Internal server error.', error: err.message });
-    }
-};
+        if (shipment.status !== 'Out for Delivery') {
+            return res.status(400).json({ message: 'Delivery verification is only available once the shipment is out for delivery.' });
+        }
 
-const getAgentPackages = async (req, res) => {
-    try {
-        const packages = await Package.find({ 'assignedAgent._id': req.user._id }).sort({ updatedAt: -1 }).lean();
+        if (shipment.paymentStatus !== 'Paid') {
+            return res.status(400).json({ message: 'Payment must be completed before final delivery confirmation.' });
+        }
+
+        const now = Date.now();
+        const validOtp = otp && shipment.otpExpiresAt && shipment.otpExpiresAt.getTime() > now && isHashMatch(otp, shipment.otpHash);
+        const validQr = qrToken &&
+            shipment.qrExpiresAt &&
+            shipment.qrExpiresAt.getTime() > now &&
+            (shipment.qrToken === qrToken || isHashMatch(qrToken, shipment.qrTokenHash));
+
+        if (!validOtp && !validQr) {
+            return res.status(400).json({ message: 'Invalid or expired OTP / QR token.' });
+        }
+
+        const verificationMethod = validOtp ? 'otp' : 'qr';
+        shipment.status = 'Delivered';
+        shipment.verificationMethod = verificationMethod;
+        shipment.receiverConfirmedAt = new Date();
+        shipment.deliveryConfirmedBy = buildActor(req.user);
+        shipment.deliveredAt = new Date();
+
+        await appendShipmentLog(
+            shipment,
+            'Delivered',
+            req.user,
+            `Delivery confirmed using ${verificationMethod.toUpperCase()} verification.`,
+            shipment.deliveryAddress
+        );
+
+        await shipment.save();
+
+        await createStakeholderNotifications(
+            req,
+            shipment,
+            `Shipment delivery has been verified using ${verificationMethod.toUpperCase()}.`,
+            'shipment.delivered',
+            { verificationMethod }
+        );
+
+        emitShipmentUpdate(req, shipment, { kind: 'delivered', verificationMethod });
 
         return res.status(200).json({
-            message: 'Assigned shipments fetched successfully.',
-            data: packages,
-            meta: getStatusBreakdown(packages)
+            message: 'Delivery verified successfully.',
+            data: sanitizeShipment(shipment, req.user)
         });
     } catch (error) {
-        return res.status(500).json({ message: 'Failed to fetch assigned shipments.', error: error.message });
+        return res.status(500).json({ message: error.message || 'Failed to verify delivery.' });
     }
 };
 
-const getSenderDashboard = async (req, res) => {
+exports.getUserPackages = async (req, res) => {
     try {
-        const packages = await Package.find({ senderId: req.user._id }).sort({ updatedAt: -1 }).lean();
-        const stats = getStatusBreakdown(packages);
+        const shipments = await Package.find({ senderUser: req.user._id }).sort({ updatedAt: -1 }).lean();
+
+        return res.status(200).json({
+            message: 'Sender shipments loaded successfully.',
+            data: shipments.map((shipment) => sanitizeShipment(shipment, req.user)),
+            meta: summarizeShipments(shipments)
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to load shipments.' });
+    }
+};
+
+exports.getReceiverPackages = async (req, res) => {
+    try {
+        const filters = [{ receiverUser: req.user._id }];
+        if (req.user.email) {
+            filters.push({ 'receiver.email': normalizeEmail(req.user.email) });
+        }
+        if (req.user.phone) {
+            filters.push({ 'receiver.phone': normalizeText(req.user.phone) });
+        }
+
+        const shipments = await Package.find({ $or: filters }).sort({ updatedAt: -1 }).lean();
+
+        return res.status(200).json({
+            message: 'Incoming shipments loaded successfully.',
+            data: shipments.map((shipment) => sanitizeShipment(shipment, req.user)),
+            meta: summarizeShipments(shipments)
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to load incoming shipments.' });
+    }
+};
+
+exports.getAgentPackages = async (req, res) => {
+    try {
+        const shipments = await Package.find({ 'assignedAgent._id': req.user._id }).sort({ updatedAt: -1 }).lean();
+
+        return res.status(200).json({
+            message: 'Assigned deliveries loaded successfully.',
+            data: shipments.map((shipment) => sanitizeShipment(shipment, req.user)),
+            meta: summarizeShipments(shipments)
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to load assigned deliveries.' });
+    }
+};
+
+exports.getPackageById = async (req, res) => {
+    try {
+        const shipment = await Package.findById(req.params.id);
+        if (!shipment) {
+            return res.status(404).json({ message: 'Shipment not found.' });
+        }
+
+        if (!userCanAccessShipment(req.user, shipment)) {
+            return res.status(403).json({ message: 'You are not allowed to view this shipment.' });
+        }
+
+        const payments = await Payment.find({ shipmentId: shipment._id }).sort({ createdAt: -1 }).lean();
+
+        return res.status(200).json({
+            message: 'Shipment loaded successfully.',
+            data: {
+                ...sanitizeShipment(shipment, req.user),
+                payments
+            }
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to load shipment.' });
+    }
+};
+
+exports.getSenderDashboard = async (req, res) => {
+    try {
+        const shipments = await Package.find({ senderUser: req.user._id }).sort({ updatedAt: -1 }).lean();
+        const payments = await Payment.find({ paidBy: req.user._id }).sort({ createdAt: -1 }).lean();
+        const stats = summarizeShipments(shipments);
 
         return res.status(200).json({
             message: 'Sender dashboard loaded successfully.',
             data: {
                 stats,
-                recentPackages: packages.slice(0, 5),
-                upcomingDeliveries: packages
-                    .filter(pkg => pkg.status !== 'Delivered' && pkg.status !== 'Cancelled')
-                    .slice(0, 3)
+                recentShipments: shipments.slice(0, 6).map((shipment) => sanitizeShipment(shipment, req.user)),
+                deliveryHistory: shipments
+                    .filter((shipment) => shipment.status === 'Delivered')
+                    .slice(0, 6)
+                    .map((shipment) => sanitizeShipment(shipment, req.user)),
+                outstandingPayments: shipments
+                    .filter((shipment) => shipment.paymentStatus !== 'Paid')
+                    .slice(0, 6)
+                    .map((shipment) => sanitizeShipment(shipment, req.user)),
+                paymentHistory: payments.slice(0, 10)
             }
         });
     } catch (error) {
-        return res.status(500).json({ message: 'Failed to load sender dashboard.', error: error.message });
+        return res.status(500).json({ message: error.message || 'Failed to load sender dashboard.' });
     }
 };
 
-const getReceiverPackages = async (req, res) => {
+exports.getReceiverDashboard = async (req, res) => {
     try {
-        const receiverEmail = String(req.user.email || '').trim().toLowerCase();
-        const receiverPhone = String(req.user.phone || '').trim();
-        const receiverFilters = [];
-
-        if (receiverEmail) {
-            receiverFilters.push({ receiverEmail });
+        const filters = [{ receiverUser: req.user._id }];
+        if (req.user.email) {
+            filters.push({ 'receiver.email': normalizeEmail(req.user.email) });
+        }
+        if (req.user.phone) {
+            filters.push({ 'receiver.phone': normalizeText(req.user.phone) });
         }
 
-        if (receiverPhone) {
-            receiverFilters.push({ receiverPhone });
-        }
-
-        if (receiverFilters.length === 0) {
-            return res.status(200).json({
-                message: 'Receiver account has no matching contact identifier for incoming shipments yet.',
-                data: [],
-                meta: getStatusBreakdown([])
-            });
-        }
-
-        const packages = await Package.find({ $or: receiverFilters }).sort({ updatedAt: -1 }).lean();
-
-        return res.status(200).json({
-            message: 'Incoming shipments loaded successfully.',
-            data: packages,
-            meta: getStatusBreakdown(packages)
-        });
-    } catch (error) {
-        return res.status(500).json({ message: 'Failed to fetch incoming shipments.', error: error.message });
-    }
-};
-
-const getReceiverDashboard = async (req, res) => {
-    try {
-        const receiverEmail = String(req.user.email || '').trim().toLowerCase();
-        const receiverPhone = String(req.user.phone || '').trim();
-        const receiverFilters = [];
-
-        if (receiverEmail) {
-            receiverFilters.push({ receiverEmail });
-        }
-
-        if (receiverPhone) {
-            receiverFilters.push({ receiverPhone });
-        }
-
-        const packages = receiverFilters.length
-            ? await Package.find({ $or: receiverFilters }).sort({ updatedAt: -1 }).lean()
-            : [];
-        const stats = getStatusBreakdown(packages);
+        const shipments = await Package.find({ $or: filters }).sort({ updatedAt: -1 }).lean();
+        const stats = summarizeShipments(shipments);
 
         return res.status(200).json({
             message: 'Receiver dashboard loaded successfully.',
             data: {
                 stats,
-                incomingPackages: packages.slice(0, 5),
-                activePackages: packages
-                    .filter(pkg => !['Delivered', 'Cancelled'].includes(pkg.status))
-                    .slice(0, 3)
+                incomingShipments: shipments.slice(0, 8).map((shipment) => sanitizeShipment(shipment, req.user)),
+                pendingVerification: shipments
+                    .filter((shipment) => shipment.status === 'Out for Delivery')
+                    .map((shipment) => sanitizeShipment(shipment, req.user))
             }
         });
     } catch (error) {
-        return res.status(500).json({ message: 'Failed to load receiver dashboard.', error: error.message });
+        return res.status(500).json({ message: error.message || 'Failed to load receiver dashboard.' });
     }
 };
 
-const getPublicTracking = async (req, res) => {
+exports.getPublicTracking = async (req, res) => {
     try {
-        const trackingNumber = req.params.trackingNumber?.trim();
+        const trackingId = normalizeText(req.params.trackingId);
+        const shipment = await Package.findOne({ trackingId: new RegExp(`^${escapeRegex(trackingId)}$`, 'i') }).lean();
 
-        const pkg = await Package.findOne({
-            trackingNumber: new RegExp(`^${escapeRegex(trackingNumber)}$`, 'i')
-        });
-
-        if (!pkg) {
-            return res.status(404).json({ message: 'Tracking number not found.' });
+        if (!shipment) {
+            return res.status(404).json({ message: 'Tracking ID not found.' });
         }
 
         return res.status(200).json({
             message: 'Tracking details loaded successfully.',
-            data: mapPackageForPublicTracking(pkg)
+            data: {
+                _id: shipment._id,
+                trackingId: shipment.trackingId,
+                sender: { name: shipment.sender?.name },
+                receiver: { name: shipment.receiver?.name },
+                packageType: shipment.packageType,
+                weight: shipment.weight,
+                pickupAddress: shipment.pickupAddress,
+                deliveryAddress: shipment.deliveryAddress,
+                status: shipment.status,
+                paymentStatus: shipment.paymentStatus,
+                estimatedDeliveryAt: shipment.estimatedDeliveryAt,
+                deliveredAt: shipment.deliveredAt,
+                assignedAgent: shipment.assignedAgent
+                    ? {
+                        name: shipment.assignedAgent.name,
+                        phone: shipment.assignedAgent.phone
+                    }
+                    : null,
+                timeline: shipment.timeline
+            }
         });
     } catch (error) {
-        return res.status(500).json({ message: 'Failed to load tracking data.', error: error.message });
+        return res.status(500).json({ message: error.message || 'Failed to load tracking details.' });
     }
-};
-
-module.exports = {
-    createPackage,
-    updateStatus,
-    getUserPackages,
-    getPackageById,
-    getAgentPackages,
-    getSenderDashboard,
-    getReceiverPackages,
-    getReceiverDashboard,
-    getPublicTracking
 };
