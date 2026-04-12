@@ -20,30 +20,10 @@ const {
     notifyRole
 } = require('../utils/shipmentEvents');
 const { isPositiveNumber, isValidEmail, isValidPhone, normalizeEmail, normalizeText } = require('../utils/validation');
-
-function isReceiverLinked(currentUser, shipment) {
-    if (!currentUser || !shipment) {
-        return false;
-    }
-
-    if (shipment.receiverUser && String(shipment.receiverUser) === String(currentUser._id)) {
-        return true;
-    }
-
-    const shipmentEmail = normalizeEmail(shipment.receiver?.email);
-    const shipmentPhone = normalizeText(shipment.receiver?.phone);
-
-    return Boolean(
-        (shipmentEmail && shipmentEmail === normalizeEmail(currentUser.email)) ||
-        (shipmentPhone && shipmentPhone === normalizeText(currentUser.phone))
-    );
-}
+const Pricing = require('../models/Pricing');
+const { sendOTPToReceiver } = require('../utils/mailer');
 
 function userCanAccessShipment(currentUser, shipment) {
-    if (!currentUser || !shipment) {
-        return false;
-    }
-
     if (currentUser.role === 'admin') {
         return true;
     }
@@ -54,10 +34,6 @@ function userCanAccessShipment(currentUser, shipment) {
 
     if (currentUser.role === 'agent') {
         return String(shipment.assignedAgent?._id) === String(currentUser._id);
-    }
-
-    if (currentUser.role === 'receiver') {
-        return isReceiverLinked(currentUser, shipment);
     }
 
     return false;
@@ -106,17 +82,6 @@ function sanitizeShipment(shipment, currentUser) {
     const data = shipment.toObject ? shipment.toObject() : { ...shipment };
 
     delete data.otpHash;
-    delete data.qrTokenHash;
-
-    const canSeeQr = ['admin', 'agent'].includes(currentUser?.role) || isReceiverLinked(currentUser, shipment);
-    if (!canSeeQr) {
-        delete data.qrToken;
-    }
-
-    if (currentUser?.role !== 'receiver') {
-        delete data.deliveryOtp;
-    }
-
     return data;
 }
 
@@ -132,28 +97,9 @@ async function syncInitialPayment(shipment) {
     });
 }
 
-async function linkReceiverUser({ receiverEmail, receiverPhone }) {
-    const filters = [];
-
-    if (receiverEmail) {
-        filters.push({ email: normalizeEmail(receiverEmail), role: 'receiver' });
-    }
-
-    if (receiverPhone) {
-        filters.push({ phone: normalizeText(receiverPhone), role: 'receiver' });
-    }
-
-    if (!filters.length) {
-        return null;
-    }
-
-    return User.findOne({ $or: filters, isActive: true }).select('_id role').lean();
-}
-
 async function createStakeholderNotifications(req, shipment, message, type, metadata = {}) {
     const recipients = [
         shipment.senderUser,
-        shipment.receiverUser,
         shipment.assignedAgent?._id
     ].filter(Boolean);
 
@@ -204,6 +150,7 @@ exports.createPackage = async (req, res) => {
         receiverName,
         receiverPhone,
         receiverEmail,
+        routeType,
         packageType,
         weight,
         pickupAddress,
@@ -217,6 +164,10 @@ exports.createPackage = async (req, res) => {
             return res.status(400).json({
                 message: 'Receiver details, package type, weight, pickup address, and delivery address are required.'
             });
+        }
+
+        if (!receiverEmail) {
+            return res.status(400).json({ message: 'Receiver email is required to dispatch the delivery OTP.' });
         }
 
         if (!isValidPhone(receiverPhone)) {
@@ -239,10 +190,19 @@ exports.createPackage = async (req, res) => {
             return res.status(400).json({ message: 'Weight must be greater than zero.' });
         }
 
-        const receiverUser = await linkReceiverUser({ receiverEmail, receiverPhone });
+        const otpCode = generateOtpCode();
+
+        let pricing = await Pricing.findOne();
+        if (!pricing) pricing = await Pricing.create({});
+
+        const basePrice = Number(pricing[routeType] || pricing.sameCity);
+        const perKgRate = Number(pricing.perKgRate || 2.5);
+        const deliveryMultiplier = serviceLevel === 'express' ? Number(pricing.expressMultiplier || 1.35) : 1;
+        
+        const calculatedAmount = (basePrice + (Number(weight) * perKgRate)) * deliveryMultiplier;
+
         const shipment = await Package.create({
             senderUser: req.user._id,
-            receiverUser: receiverUser?._id || null,
             sender: {
                 name: normalizeText(senderName) || req.user.name,
                 email: normalizeEmail(senderEmail) || req.user.email,
@@ -262,8 +222,10 @@ exports.createPackage = async (req, res) => {
             deliveryAddress: normalizeText(deliveryAddress),
             notes: normalizeText(notes),
             paymentStatus: 'Unpaid',
-            paymentAmount: calculateShippingFee(weight, serviceLevel),
-            estimatedDeliveryAt: getEstimatedDeliveryAt(serviceLevel)
+            paymentAmount: Math.round(calculatedAmount),
+            currency: pricing.currency || 'NPR',
+            estimatedDeliveryAt: getEstimatedDeliveryAt(serviceLevel),
+            otpHash: hashValue(otpCode)
         });
 
         shipment.timeline[0].actor = buildActor(req.user);
@@ -284,9 +246,15 @@ exports.createPackage = async (req, res) => {
 
         emitShipmentUpdate(req, shipment, { kind: 'created' });
 
+        // Fire and forget OTP email
+        sendOTPToReceiver(shipment.receiver.email, shipment.trackingId, otpCode).catch(console.error);
+
+        const resData = sanitizeShipment(shipment, req.user);
+        resData.deliveryOtp = otpCode;
+
         return res.status(201).json({
             message: 'Shipment created successfully.',
-            data: sanitizeShipment(shipment, req.user)
+            data: resData
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to create shipment.' });
@@ -331,28 +299,16 @@ exports.updateStatus = async (req, res) => {
         shipment.status = status;
 
         if (status === 'Out for Delivery') {
-            const otpCode = generateOtpCode();
-            const qrToken = `NEXQR-${shipment.trackingId}-${generateToken(6)}`;
-            const expiresAt = new Date(Date.now() + 6 * 60 * 60 * 1000);
-
-            shipment.otpHash = hashValue(otpCode);
-            shipment.otpExpiresAt = expiresAt;
-            shipment.qrToken = qrToken;
-            shipment.qrTokenHash = hashValue(qrToken);
-            shipment.qrExpiresAt = expiresAt;
             shipment.outForDeliveryAt = new Date();
 
             await createStakeholderNotifications(
                 req,
                 shipment,
                 shipment.paymentStatus === 'Paid'
-                    ? 'Shipment is out for delivery. Use the OTP or QR token to verify the final handoff.'
+                    ? 'Shipment is out for delivery.'
                     : 'Shipment is out for delivery, but payment is still pending before final confirmation.',
                 'shipment.out_for_delivery',
                 {
-                    otpCode,
-                    qrToken,
-                    expiresAt,
                     paymentStatus: shipment.paymentStatus
                 }
             );
@@ -380,7 +336,7 @@ exports.updateStatus = async (req, res) => {
 
 exports.verifyDelivery = async (req, res) => {
     const { packageId } = req.params;
-    const { otp = '', qrToken = '' } = req.body;
+    const { otp = '' } = req.body;
 
     try {
         const shipment = await Package.findById(packageId);
@@ -400,20 +356,13 @@ exports.verifyDelivery = async (req, res) => {
             return res.status(400).json({ message: 'Payment must be completed before final delivery confirmation.' });
         }
 
-        const now = Date.now();
-        const validOtp = otp && shipment.otpExpiresAt && shipment.otpExpiresAt.getTime() > now && isHashMatch(otp, shipment.otpHash);
-        const validQr = qrToken &&
-            shipment.qrExpiresAt &&
-            shipment.qrExpiresAt.getTime() > now &&
-            (shipment.qrToken === qrToken || isHashMatch(qrToken, shipment.qrTokenHash));
+        const validOtp = otp && isHashMatch(otp, shipment.otpHash);
 
-        if (!validOtp && !validQr) {
-            return res.status(400).json({ message: 'Invalid or expired OTP / QR token.' });
+        if (!validOtp) {
+            return res.status(400).json({ message: 'Invalid OTP.' });
         }
 
-        const verificationMethod = validOtp ? 'otp' : 'qr';
         shipment.status = 'Delivered';
-        shipment.verificationMethod = verificationMethod;
         shipment.receiverConfirmedAt = new Date();
         shipment.deliveryConfirmedBy = buildActor(req.user);
         shipment.deliveredAt = new Date();
@@ -422,7 +371,7 @@ exports.verifyDelivery = async (req, res) => {
             shipment,
             'Delivered',
             req.user,
-            `Delivery confirmed using ${verificationMethod.toUpperCase()} verification.`,
+            `Delivery confirmed using OTP verification.`,
             shipment.deliveryAddress
         );
 
@@ -431,12 +380,12 @@ exports.verifyDelivery = async (req, res) => {
         await createStakeholderNotifications(
             req,
             shipment,
-            `Shipment delivery has been verified using ${verificationMethod.toUpperCase()}.`,
+            `Shipment delivery has been verified using OTP.`,
             'shipment.delivered',
-            { verificationMethod }
+            { verificationMethod: 'otp' }
         );
 
-        emitShipmentUpdate(req, shipment, { kind: 'delivered', verificationMethod });
+        emitShipmentUpdate(req, shipment, { kind: 'delivered', verificationMethod: 'otp' });
 
         return res.status(200).json({
             message: 'Delivery verified successfully.',
@@ -461,27 +410,7 @@ exports.getUserPackages = async (req, res) => {
     }
 };
 
-exports.getReceiverPackages = async (req, res) => {
-    try {
-        const filters = [{ receiverUser: req.user._id }];
-        if (req.user.email) {
-            filters.push({ 'receiver.email': normalizeEmail(req.user.email) });
-        }
-        if (req.user.phone) {
-            filters.push({ 'receiver.phone': normalizeText(req.user.phone) });
-        }
-
-        const shipments = await Package.find({ $or: filters }).sort({ updatedAt: -1 }).lean();
-
-        return res.status(200).json({
-            message: 'Incoming shipments loaded successfully.',
-            data: shipments.map((shipment) => sanitizeShipment(shipment, req.user)),
-            meta: summarizeShipments(shipments)
-        });
-    } catch (error) {
-        return res.status(500).json({ message: error.message || 'Failed to load incoming shipments.' });
-    }
-};
+// Removed receiver dashboard/packages methods
 
 exports.getAgentPackages = async (req, res) => {
     try {
@@ -546,34 +475,6 @@ exports.getSenderDashboard = async (req, res) => {
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to load sender dashboard.' });
-    }
-};
-
-exports.getReceiverDashboard = async (req, res) => {
-    try {
-        const filters = [{ receiverUser: req.user._id }];
-        if (req.user.email) {
-            filters.push({ 'receiver.email': normalizeEmail(req.user.email) });
-        }
-        if (req.user.phone) {
-            filters.push({ 'receiver.phone': normalizeText(req.user.phone) });
-        }
-
-        const shipments = await Package.find({ $or: filters }).sort({ updatedAt: -1 }).lean();
-        const stats = summarizeShipments(shipments);
-
-        return res.status(200).json({
-            message: 'Receiver dashboard loaded successfully.',
-            data: {
-                stats,
-                incomingShipments: shipments.slice(0, 8).map((shipment) => sanitizeShipment(shipment, req.user)),
-                pendingVerification: shipments
-                    .filter((shipment) => shipment.status === 'Out for Delivery')
-                    .map((shipment) => sanitizeShipment(shipment, req.user))
-            }
-        });
-    } catch (error) {
-        return res.status(500).json({ message: error.message || 'Failed to load receiver dashboard.' });
     }
 };
 

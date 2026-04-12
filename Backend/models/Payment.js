@@ -6,7 +6,7 @@ const paymentSchema = new mongoose.Schema(
         shipmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Package', required: true, index: true },
         trackingId: { type: String, required: true, trim: true, index: true },
         amount: { type: Number, required: true, min: 0 },
-        currency: { type: String, trim: true, default: 'USD' },
+        currency: { type: String, trim: true, default: 'NPR' },
         method: { type: String, trim: true, default: 'mock' },
         status: { type: String, enum: PAYMENT_STATUSES, default: 'Unpaid', index: true },
         paidBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },

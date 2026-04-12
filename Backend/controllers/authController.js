@@ -1,7 +1,9 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const crypto = require('crypto');
 const { isValidEmail, isValidPhone, normalizeEmail, normalizeText } = require('../utils/validation');
+const { sendVerificationMail } = require('../utils/mailer');
 
 function buildAuthPayload(user) {
     return {
@@ -62,7 +64,7 @@ exports.register = async (req, res) => {
             return res.status(400).json({ message: 'Name, email, and password are required.' });
         }
 
-        if (!['admin', 'sender', 'receiver', 'agent'].includes(role)) {
+        if (!['admin', 'sender', 'agent'].includes(role)) {
             return res.status(400).json({ message: 'Invalid account role selected.' });
         }
 
@@ -90,6 +92,8 @@ exports.register = async (req, res) => {
             return res.status(409).json({ message: 'An account with this email already exists.' });
         }
 
+        const verificationToken = crypto.randomBytes(32).toString('hex');
+
         const hashedPassword = await bcrypt.hash(password, 10);
         const newUser = await User.create({
             name: normalizeText(name),
@@ -99,18 +103,44 @@ exports.register = async (req, res) => {
             address: normalizeText(address),
             city: normalizeText(city),
             state: normalizeText(state),
-            country: normalizeText(country) || 'United States',
+            country: normalizeText(country) || 'Nepal',
             hub: normalizeText(hub),
             role,
-            isAvailable: role === 'agent' ? false : undefined
+            isAvailable: role === 'agent' ? false : undefined,
+            verificationToken
         });
 
+        // Fire and forget email dispatch
+        sendVerificationMail(newUser.email, verificationToken).catch(console.error);
+
         return res.status(201).json({
-            message: 'Account created successfully.',
+            message: 'Account created successfully. Please check your email for the verification link.',
             data: buildAuthPayload(newUser)
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Registration failed.' });
+    }
+};
+
+exports.verifyEmail = async (req, res) => {
+    const { token } = req.body;
+    try {
+        if (!token) {
+            return res.status(400).json({ message: 'Verification token is missing.' });
+        }
+        
+        const user = await User.findOne({ verificationToken: token });
+        if (!user) {
+            return res.status(400).json({ message: 'Invalid or expired verification token.' });
+        }
+        
+        user.isEmailVerified = true;
+        user.verificationToken = null;
+        await user.save();
+        
+        return res.status(200).json({ message: 'Email address verified successfully. You may now log in.' });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Verification failed.' });
     }
 };
 
@@ -129,6 +159,10 @@ exports.login = async (req, res) => {
 
         if (!user.isActive) {
             return res.status(403).json({ message: 'This account is inactive. Please contact an administrator.' });
+        }
+        
+        if (!user.isEmailVerified) {
+            return res.status(403).json({ message: 'Please verify your email address before logging in.' });
         }
 
         const isMatch = await bcrypt.compare(password, user.password);

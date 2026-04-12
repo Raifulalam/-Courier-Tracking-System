@@ -1,94 +1,42 @@
-const { calculateDeliveryPrice, getPricingSettings } = require('../utils/pricingEngine');
+const Pricing = require('../models/Pricing');
 
-const pricingFields = [
-    'sameCity',
-    'sameDistrict',
-    'sameProvince',
-    'differentProvince',
-    'perKgRate',
-    'expressMultiplier',
-    'codCharge'
-];
-
-function parsePricingPayload(body = {}) {
-    return pricingFields.reduce((acc, field) => {
-        if (body[field] !== undefined) {
-            acc[field] = Number(body[field]);
-        }
-
-        return acc;
-    }, {});
-}
-
-function hasInvalidPricingValues(payload = {}) {
-    return Object.values(payload).some((value) => Number.isNaN(value) || value < 0);
-}
-
-const getPricing = async (_req, res) => {
+const getPricing = async (req, res) => {
     try {
-        const pricing = await getPricingSettings();
-
-        return res.status(200).json({
-            message: 'Pricing configuration loaded successfully.',
-            data: pricing
-        });
+        let pricing = await Pricing.findOne();
+        if (!pricing) {
+            pricing = await Pricing.create({});
+        }
+        res.status(200).json(pricing);
     } catch (error) {
-        return res.status(500).json({ message: 'Failed to load pricing configuration.', error: error.message });
+        res.status(500).json({ message: 'Error fetching pricing configuration.', error: error.message });
     }
 };
 
 const updatePricing = async (req, res) => {
     try {
-        const updates = parsePricingPayload(req.body);
-
-        if (!Object.keys(updates).length) {
-            return res.status(400).json({ message: 'At least one pricing field is required.' });
+        const { sameCity, sameDistrict, sameProvince, differentProvince, perKgRate, expressMultiplier, codCharge } = req.body;
+        
+        let pricing = await Pricing.findOne();
+        if (!pricing) {
+            pricing = new Pricing();
         }
 
-        if (hasInvalidPricingValues(updates)) {
-            return res.status(400).json({ message: 'Pricing values must be valid non-negative numbers.' });
-        }
+        if (sameCity !== undefined) pricing.sameCity = sameCity;
+        if (sameDistrict !== undefined) pricing.sameDistrict = sameDistrict;
+        if (sameProvince !== undefined) pricing.sameProvince = sameProvince;
+        if (differentProvince !== undefined) pricing.differentProvince = differentProvince;
+        if (perKgRate !== undefined) pricing.perKgRate = perKgRate;
+        if (expressMultiplier !== undefined) pricing.expressMultiplier = expressMultiplier;
+        if (codCharge !== undefined) pricing.codCharge = codCharge;
 
-        if (updates.expressMultiplier !== undefined && updates.expressMultiplier < 1) {
-            return res.status(400).json({ message: 'Express multiplier must be at least 1.' });
-        }
-
-        const pricing = await getPricingSettings();
-        Object.assign(pricing, updates);
         await pricing.save();
-
-        return res.status(200).json({
-            message: 'Pricing configuration updated successfully.',
-            data: pricing
-        });
+        res.status(200).json({ message: 'Pricing updated successfully', pricing });
     } catch (error) {
-        return res.status(500).json({ message: 'Failed to update pricing configuration.', error: error.message });
-    }
-};
-
-const getPricingPreview = async (req, res) => {
-    try {
-        const pricing = await getPricingSettings();
-        const breakdown = calculateDeliveryPrice({
-            senderLocation: req.body.senderLocation,
-            receiverLocation: req.body.receiverLocation,
-            weight: req.body.weight,
-            deliveryType: req.body.deliveryType,
-            paymentMode: req.body.paymentMode,
-            pricing
-        });
-
-        return res.status(200).json({
-            message: 'Pricing preview generated successfully.',
-            data: breakdown
-        });
-    } catch (error) {
-        return res.status(500).json({ message: 'Failed to generate pricing preview.', error: error.message });
+        res.status(500).json({ message: 'Error updating pricing.', error: error.message });
     }
 };
 
 module.exports = {
     getPricing,
-    updatePricing,
-    getPricingPreview
+    updatePricing
 };

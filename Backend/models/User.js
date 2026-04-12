@@ -9,17 +9,19 @@ const userSchema = new mongoose.Schema(
         address: { type: String, trim: true, default: '' },
         city: { type: String, trim: true, default: '' },
         state: { type: String, trim: true, default: '' },
-        country: { type: String, trim: true, default: 'United States' },
+        country: { type: String, trim: true, default: 'Nepal' },
         role: {
             type: String,
-            enum: ['sender', 'agent', 'receiver', 'admin'],
+            enum: ['sender', 'agent', 'admin'],
             default: 'sender',
             index: true
         },
         hub: { type: String, trim: true, default: '' },
         isActive: { type: Boolean, default: true },
         isAvailable: { type: Boolean, default: false, index: true },
-        lastSeenAt: { type: Date, default: Date.now }
+        lastSeenAt: { type: Date, default: Date.now },
+        isEmailVerified: { type: Boolean, default: false },
+        verificationToken: { type: String, default: null }
     },
     { timestamps: true }
 );

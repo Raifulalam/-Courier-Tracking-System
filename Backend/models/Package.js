@@ -60,7 +60,6 @@ const shipmentSchema = new mongoose.Schema(
             default: generateTrackingNumber
         },
         senderUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-        receiverUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
         sender: { type: personSchema, required: true },
         receiver: { type: personSchema, required: true },
         packageType: { type: String, required: true, trim: true },
@@ -77,13 +76,8 @@ const shipmentSchema = new mongoose.Schema(
         assignedAgent: { type: assignedAgentSchema, default: null },
         paymentStatus: { type: String, enum: PAYMENT_STATUSES, default: 'Unpaid', index: true },
         paymentAmount: { type: Number, min: 0, default: 0 },
-        currency: { type: String, trim: true, default: 'USD' },
+        currency: { type: String, trim: true, default: 'NPR' },
         otpHash: { type: String, trim: true, default: '' },
-        otpExpiresAt: { type: Date, default: null },
-        qrToken: { type: String, trim: true, default: '' },
-        qrTokenHash: { type: String, trim: true, default: '' },
-        qrExpiresAt: { type: Date, default: null },
-        verificationMethod: { type: String, enum: ['otp', 'qr', ''], default: '' },
         receiverConfirmedAt: { type: Date, default: null },
         deliveryConfirmedBy: { type: actorSchema, default: null },
         outForDeliveryAt: { type: Date, default: null },
@@ -99,7 +93,6 @@ const shipmentSchema = new mongoose.Schema(
 
 shipmentSchema.index({ 'assignedAgent._id': 1, status: 1 });
 shipmentSchema.index({ senderUser: 1, updatedAt: -1 });
-shipmentSchema.index({ receiverUser: 1, updatedAt: -1 });
 shipmentSchema.index({ status: 1, createdAt: -1 });
 
 shipmentSchema.pre('validate', function syncShipmentDefaults(next) {
