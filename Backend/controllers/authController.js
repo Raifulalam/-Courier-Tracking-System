@@ -221,3 +221,34 @@ exports.updateProfile = async (req, res) => {
         return res.status(500).json({ message: error.message || 'Failed to update profile.' });
     }
 };
+
+exports.resendVerification = async (req, res) => {
+    const { email } = req.body;
+    try {
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required.' });
+        }
+        
+        const normalizedEmail = normalizeEmail(email);
+        const user = await User.findOne({ email: normalizedEmail });
+        
+        if (!user) {
+            return res.status(404).json({ message: 'No registered account found with this email.' });
+        }
+        
+        if (user.isEmailVerified) {
+            return res.status(400).json({ message: 'This email is already verified. You can log in directly.' });
+        }
+
+        const verificationToken = crypto.randomBytes(32).toString('hex');
+        user.verificationToken = verificationToken;
+        await user.save();
+
+        // Fire and forget email dispatch
+        sendVerificationMail(user.email, verificationToken).catch(console.error);
+
+        return res.status(200).json({ message: 'A fresh verification link has been sent to your email address.' });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to resend verification email.' });
+    }
+};
