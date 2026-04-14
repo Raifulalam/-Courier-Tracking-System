@@ -1,5 +1,5 @@
 const nodemailer = require('nodemailer');
-
+console.log("🚀 USING SENDGRID MAILER");
 // ✅ Create SendGrid transporter
 const transporter = nodemailer.createTransport({
     host: "smtp.sendgrid.net",
