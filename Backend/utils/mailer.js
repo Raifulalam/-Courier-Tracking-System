@@ -3,12 +3,15 @@ console.log("🚀 USING SENDGRID MAILER");
 // ✅ Create SendGrid transporter
 const transporter = nodemailer.createTransport({
     host: "smtp.sendgrid.net",
-    port: 587,
+    port: 2525, // 🔥 IMPORTANT FIX
     secure: false,
     auth: {
-        user: "apikey", // MUST be 'apikey'
+        user: "apikey",
         pass: process.env.SENDGRID_API_KEY,
     },
+    connectionTimeout: 5000,
+    greetingTimeout: 5000,
+    socketTimeout: 5000,
 });
 
 // ✅ Generic send function
