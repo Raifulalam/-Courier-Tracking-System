@@ -251,7 +251,7 @@ exports.resendVerification = async (req, res) => {
 
         // Fire and forget email dispatch
 
-        await sendVerificationMail(user.email, verificationToken);
+        sendVerificationMail(user.email, verificationToken);
 
         return res.status(200).json({ message: 'A fresh verification link has been sent to your email address.' });
     } catch (error) {
