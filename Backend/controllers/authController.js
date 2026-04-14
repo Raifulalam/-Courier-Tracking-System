@@ -111,8 +111,10 @@ exports.register = async (req, res) => {
         });
 
         // Fire and forget email dispatch
+        console.log("Running on Render");
+        console.log("EMAIL_USER:", process.env.EMAIL_USER);
 
-        await sendVerificationMail(newUser.email, verificationToken);
+        sendVerificationMail(newUser.email, verificationToken);
 
         return res.status(201).json({
             message: 'Account created successfully. Please check your email for the verification link.',
@@ -224,7 +226,8 @@ exports.updateProfile = async (req, res) => {
 };
 
 exports.resendVerification = async (req, res) => {
-
+    console.log("Running on Render");
+    console.log("EMAIL_USER:", process.env.EMAIL_USER);
     const { email } = req.body;
     try {
         if (!email) {
