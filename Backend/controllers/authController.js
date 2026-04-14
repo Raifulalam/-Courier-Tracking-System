@@ -111,7 +111,8 @@ exports.register = async (req, res) => {
         });
 
         // Fire and forget email dispatch
-        sendVerificationMail(newUser.email, verificationToken).catch(console.error);
+
+        await sendVerificationMail(newUser.email, verificationToken);
 
         return res.status(201).json({
             message: 'Account created successfully. Please check your email for the verification link.',
@@ -128,16 +129,16 @@ exports.verifyEmail = async (req, res) => {
         if (!token) {
             return res.status(400).json({ message: 'Verification token is missing.' });
         }
-        
+
         const user = await User.findOne({ verificationToken: token });
         if (!user) {
             return res.status(400).json({ message: 'Invalid or expired verification token.' });
         }
-        
+
         user.isEmailVerified = true;
         user.verificationToken = null;
         await user.save();
-        
+
         return res.status(200).json({ message: 'Email address verified successfully. You may now log in.' });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Verification failed.' });
@@ -160,7 +161,7 @@ exports.login = async (req, res) => {
         if (!user.isActive) {
             return res.status(403).json({ message: 'This account is inactive. Please contact an administrator.' });
         }
-        
+
         if (!user.isEmailVerified) {
             return res.status(403).json({ message: 'Please verify your email address before logging in.' });
         }
@@ -223,19 +224,20 @@ exports.updateProfile = async (req, res) => {
 };
 
 exports.resendVerification = async (req, res) => {
+
     const { email } = req.body;
     try {
         if (!email) {
             return res.status(400).json({ message: 'Email is required.' });
         }
-        
+
         const normalizedEmail = normalizeEmail(email);
         const user = await User.findOne({ email: normalizedEmail });
-        
+
         if (!user) {
             return res.status(404).json({ message: 'No registered account found with this email.' });
         }
-        
+
         if (user.isEmailVerified) {
             return res.status(400).json({ message: 'This email is already verified. You can log in directly.' });
         }
@@ -245,7 +247,8 @@ exports.resendVerification = async (req, res) => {
         await user.save();
 
         // Fire and forget email dispatch
-        sendVerificationMail(user.email, verificationToken).catch(console.error);
+
+        await sendVerificationMail(user.email, verificationToken);
 
         return res.status(200).json({ message: 'A fresh verification link has been sent to your email address.' });
     } catch (error) {

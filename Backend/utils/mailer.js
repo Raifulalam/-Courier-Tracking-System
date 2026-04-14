@@ -24,7 +24,7 @@ exports.sendMail = async ({ to, subject, html }) => {
             subject,
             html
         });
-        
+
         console.log(`Message sent: ${info.messageId}`);
     } catch (error) {
         console.error('Error sending email:', error);
@@ -35,7 +35,7 @@ exports.sendVerificationMail = async (email, token) => {
     // Determine the frontend base URL. For development it's typically localhost:5173
     const baseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
     const link = `${baseUrl}/verify-email?token=${token}`;
-    
+
     await exports.sendMail({
         to: email,
         subject: 'Verify your NexExpree Account',
@@ -72,4 +72,5 @@ exports.sendOTPToReceiver = async (email, trackingId, otp) => {
             </div>
         `
     });
+
 };
