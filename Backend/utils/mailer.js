@@ -15,7 +15,7 @@ const transporter = nodemailer.createTransport({
 exports.sendMail = async ({ to, subject, html }) => {
     try {
         console.log("📧 Sending email to:", to);
-
+        console.log("SENDGRID KEY:", process.env.SENDGRID_API_KEY ? "EXISTS" : "MISSING");
         if (!process.env.SENDGRID_API_KEY) {
             throw new Error("SENDGRID_API_KEY missing");
         }
