@@ -10,6 +10,7 @@ const {
     emitNotificationEvents,
     emitShipmentUpdate
 } = require('../utils/shipmentEvents');
+const { sendShipmentStatusEmails } = require('../utils/mailer');
 const { normalizeText } = require('../utils/validation');
 
 function escapeRegex(value) {
@@ -76,6 +77,12 @@ async function getAgentLoadMap() {
     }, {});
 }
 
+function queueShipmentStatusEmails(shipment, details) {
+    sendShipmentStatusEmails(shipment, details).catch((error) => {
+        console.error('Failed to send shipment status emails:', error.message);
+    });
+}
+
 exports.getAllUsers = async (_req, res) => {
     try {
         const users = await User.find().select('-password').sort({ createdAt: -1 }).lean();
@@ -93,6 +100,57 @@ exports.getAllUsers = async (_req, res) => {
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to load users.' });
+    }
+};
+
+exports.updateUserManagement = async (req, res) => {
+    const { userId } = req.params;
+    const { role, hub, isActive } = req.body;
+
+    try {
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+
+        if (String(req.user._id) === String(user._id) && isActive === false) {
+            return res.status(400).json({ message: 'You cannot deactivate your own admin account.' });
+        }
+
+        if (role !== undefined) {
+            if (!['admin', 'sender', 'agent'].includes(role)) {
+                return res.status(400).json({ message: 'Invalid user role.' });
+            }
+
+            if (String(req.user._id) === String(user._id) && role !== 'admin') {
+                return res.status(400).json({ message: 'You cannot remove admin access from your own account.' });
+            }
+
+            user.role = role;
+            if (role !== 'agent') {
+                user.isAvailable = false;
+            }
+        }
+
+        if (hub !== undefined) {
+            user.hub = normalizeText(hub);
+        }
+
+        if (typeof isActive === 'boolean') {
+            user.isActive = isActive;
+            if (!isActive) {
+                user.isAvailable = false;
+            }
+        }
+
+        await user.save();
+
+        return res.status(200).json({
+            message: 'User updated successfully.',
+            data: user.toJSON()
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to update user.' });
     }
 };
 
@@ -191,6 +249,8 @@ exports.assignAgentToPackage = async (req, res) => {
             return res.status(404).json({ message: 'Shipment not found.' });
         }
 
+        const previousStatus = shipment.status;
+
         if (!['Pending', 'Assigned'].includes(shipment.status)) {
             return res.status(400).json({ message: 'Only pending or already-assigned shipments can be reassigned.' });
         }
@@ -246,6 +306,13 @@ exports.assignAgentToPackage = async (req, res) => {
 
         emitNotificationEvents(req, notifications);
         emitShipmentUpdate(req, shipment, { kind: 'assigned', agentId: agent._id });
+        queueShipmentStatusEmails(shipment, {
+            previousStatus,
+            nextStatus: 'Assigned',
+            note: normalizeText(note) || `Shipment assigned to ${agent.name}.`,
+            location: shipment.pickupAddress,
+            actorName: req.user?.name || 'System'
+        });
 
         return res.status(200).json({
             message: 'Agent assigned successfully.',

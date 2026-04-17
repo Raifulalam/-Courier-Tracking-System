@@ -3,12 +3,14 @@ const { verifyToken, checkRole } = require('../middleware/authMiddleware');
 const {
     getPayments,
     getShipmentPayments,
-    payForShipment
+    payForShipment,
+    getEarningsSummary
 } = require('../controllers/paymentController');
 
 const router = express.Router();
 
 router.get('/', verifyToken, checkRole(['admin', 'sender', 'receiver', 'agent']), getPayments);
+router.get('/earnings/summary', verifyToken, checkRole(['admin', 'agent']), getEarningsSummary);
 router.get('/:shipmentId', verifyToken, checkRole(['admin', 'sender', 'receiver', 'agent']), getShipmentPayments);
 router.post('/:shipmentId/pay', verifyToken, checkRole(['admin', 'sender', 'receiver']), payForShipment);
 

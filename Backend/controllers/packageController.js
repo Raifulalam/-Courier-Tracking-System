@@ -21,7 +21,11 @@ const {
 } = require('../utils/shipmentEvents');
 const { isPositiveNumber, isValidEmail, isValidPhone, normalizeEmail, normalizeText } = require('../utils/validation');
 const Pricing = require('../models/Pricing');
-const { sendOTPToReceiver } = require('../utils/mailer');
+const {
+    sendOTPToReceiver,
+    sendShipmentCreatedEmails,
+    sendShipmentStatusEmails
+} = require('../utils/mailer');
 
 function userCanAccessShipment(currentUser, shipment) {
     if (currentUser.role === 'admin') {
@@ -142,6 +146,18 @@ async function createInitialDeliveryLog(shipment) {
     });
 }
 
+function queueShipmentCreatedEmails(shipment, otpCode) {
+    sendShipmentCreatedEmails(shipment, otpCode).catch((error) => {
+        console.error('Failed to send shipment creation emails:', error.message);
+    });
+}
+
+function queueShipmentStatusEmails(shipment, details) {
+    sendShipmentStatusEmails(shipment, details).catch((error) => {
+        console.error('Failed to send shipment status emails:', error.message);
+    });
+}
+
 exports.createPackage = async (req, res) => {
     const {
         senderName,
@@ -246,7 +262,7 @@ exports.createPackage = async (req, res) => {
 
         emitShipmentUpdate(req, shipment, { kind: 'created' });
 
-        // Fire and forget OTP email
+        queueShipmentCreatedEmails(shipment, otpCode);
         sendOTPToReceiver(shipment.receiver.email, shipment.trackingId, otpCode).catch(console.error);
 
         const resData = sanitizeShipment(shipment, req.user);
@@ -296,7 +312,10 @@ exports.updateStatus = async (req, res) => {
             });
         }
 
+        const previousStatus = shipment.status;
         shipment.status = status;
+        const normalizedNote = normalizeText(note) || STATUS_LABELS[status];
+        const normalizedLocation = normalizeText(location) || (status === 'Picked Up' ? shipment.pickupAddress : shipment.deliveryAddress);
 
         if (status === 'Out for Delivery') {
             shipment.outForDeliveryAt = new Date();
@@ -318,12 +337,19 @@ exports.updateStatus = async (req, res) => {
             shipment,
             status,
             req.user,
-            normalizeText(note) || STATUS_LABELS[status],
-            normalizeText(location) || (status === 'Picked Up' ? shipment.pickupAddress : shipment.deliveryAddress)
+            normalizedNote,
+            normalizedLocation
         );
 
         await shipment.save();
         emitShipmentUpdate(req, shipment, { kind: 'status', status });
+        queueShipmentStatusEmails(shipment, {
+            previousStatus,
+            nextStatus: status,
+            note: normalizedNote,
+            location: normalizedLocation,
+            actorName: req.user?.name || 'System'
+        });
 
         return res.status(200).json({
             message: 'Shipment status updated successfully.',
@@ -362,6 +388,7 @@ exports.verifyDelivery = async (req, res) => {
             return res.status(400).json({ message: 'Invalid OTP.' });
         }
 
+        const previousStatus = shipment.status;
         shipment.status = 'Delivered';
         shipment.receiverConfirmedAt = new Date();
         shipment.deliveryConfirmedBy = buildActor(req.user);
@@ -386,6 +413,14 @@ exports.verifyDelivery = async (req, res) => {
         );
 
         emitShipmentUpdate(req, shipment, { kind: 'delivered', verificationMethod: 'otp' });
+        queueShipmentStatusEmails(shipment, {
+            previousStatus,
+            nextStatus: 'Delivered',
+            note: 'Delivery confirmed using OTP verification.',
+            location: shipment.deliveryAddress,
+            actorName: req.user?.name || 'System',
+            verificationMethod: 'otp'
+        });
 
         return res.status(200).json({
             message: 'Delivery verified successfully.',

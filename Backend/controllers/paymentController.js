@@ -1,5 +1,6 @@
 const Package = require('../models/Package');
 const Payment = require('../models/Payment');
+const User = require('../models/User');
 const {
     createNotificationsForUsers,
     emitNotificationEvents,
@@ -7,6 +8,9 @@ const {
     notifyRole
 } = require('../utils/shipmentEvents');
 const { generateToken } = require('../utils/security');
+
+const AGENT_SHARE_RATE = 0.7;
+const ADMIN_SHARE_RATE = 0.3;
 
 function userCanAccessPayment(user, shipment) {
     if (!user || !shipment) {
@@ -35,6 +39,165 @@ function userCanAccessPayment(user, shipment) {
 
     return false;
 }
+
+function buildMonthBuckets(rows = [], monthsBack = 6) {
+    const now = new Date();
+    const buckets = Array.from({ length: monthsBack }, (_, index) => {
+        const bucketDate = new Date(now.getFullYear(), now.getMonth() - (monthsBack - index - 1), 1);
+        const key = `${bucketDate.getFullYear()}-${String(bucketDate.getMonth() + 1).padStart(2, '0')}`;
+
+        return {
+            key,
+            label: bucketDate.toLocaleDateString(undefined, { month: 'short' }),
+            gross: 0,
+            agentShare: 0,
+            adminShare: 0
+        };
+    });
+
+    const bucketMap = new Map(buckets.map((item) => [item.key, item]));
+
+    rows.forEach((row) => {
+        const date = new Date(row.paidAt || row.createdAt);
+        const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+        const bucket = bucketMap.get(key);
+
+        if (!bucket) {
+            return;
+        }
+
+        bucket.gross += row.amount;
+        bucket.agentShare += row.agentShare;
+        bucket.adminShare += row.adminShare;
+    });
+
+    return buckets;
+}
+
+function normalizeEndDate(value) {
+    const parsed = new Date(value);
+    parsed.setHours(23, 59, 59, 999);
+    return parsed;
+}
+
+exports.getEarningsSummary = async (req, res) => {
+    const { fromDate = '', toDate = '', agentId = '' } = req.query;
+
+    try {
+        let shipmentQuery = {};
+
+        if (req.user.role === 'agent') {
+            shipmentQuery = { 'assignedAgent._id': req.user._id };
+        } else if (agentId) {
+            shipmentQuery = { 'assignedAgent._id': agentId };
+        }
+
+        const shipments = await Package.find(shipmentQuery)
+            .select('trackingId assignedAgent sender receiver packageType paymentAmount paymentStatus')
+            .lean();
+
+        const shipmentIds = shipments.map((shipment) => shipment._id);
+        const shipmentMap = new Map(shipments.map((shipment) => [String(shipment._id), shipment]));
+
+        const paymentQuery = {
+            status: 'Paid',
+            ...(req.user.role === 'admin' || shipmentIds.length
+                ? { shipmentId: { $in: shipmentIds } }
+                : { shipmentId: { $in: [] } })
+        };
+
+        const payments = await Payment.find(paymentQuery).sort({ paidAt: -1, createdAt: -1 }).lean();
+
+        const parsedFrom = fromDate ? new Date(fromDate) : null;
+        const parsedTo = toDate ? normalizeEndDate(toDate) : null;
+
+        let rows = payments.map((payment) => {
+            const shipment = shipmentMap.get(String(payment.shipmentId));
+            const amount = Number(payment.amount || 0);
+            const agentShare = Number((amount * AGENT_SHARE_RATE).toFixed(2));
+            const adminShare = Number((amount * ADMIN_SHARE_RATE).toFixed(2));
+
+            return {
+                ...payment,
+                amount,
+                agentShare,
+                adminShare,
+                shipmentId: payment.shipmentId,
+                agentId: shipment?.assignedAgent?._id || null,
+                agentName: shipment?.assignedAgent?.name || 'Unassigned',
+                senderName: shipment?.sender?.name || 'Unknown sender',
+                receiverName: shipment?.receiver?.name || 'Unknown receiver',
+                packageType: shipment?.packageType || 'Shipment',
+                paidAt: payment.paidAt || payment.createdAt
+            };
+        });
+
+        rows = rows.filter((row) => {
+            const paidAt = new Date(row.paidAt || row.createdAt);
+            if (parsedFrom && paidAt < parsedFrom) {
+                return false;
+            }
+            if (parsedTo && paidAt > parsedTo) {
+                return false;
+            }
+            return true;
+        });
+
+        const totals = rows.reduce(
+            (acc, row) => {
+                acc.gross += row.amount;
+                acc.agentShare += row.agentShare;
+                acc.adminShare += row.adminShare;
+                acc.transactions += 1;
+                return acc;
+            },
+            { gross: 0, agentShare: 0, adminShare: 0, transactions: 0 }
+        );
+
+        const agentBreakdownMap = rows.reduce((acc, row) => {
+            const key = String(row.agentId || 'unassigned');
+            if (!acc[key]) {
+                acc[key] = {
+                    agentId: row.agentId,
+                    agentName: row.agentName,
+                    transactions: 0,
+                    gross: 0,
+                    agentShare: 0,
+                    adminShare: 0
+                };
+            }
+
+            acc[key].transactions += 1;
+            acc[key].gross += row.amount;
+            acc[key].agentShare += row.agentShare;
+            acc[key].adminShare += row.adminShare;
+            return acc;
+        }, {});
+
+        const agentBreakdown = Object.values(agentBreakdownMap).sort((left, right) => right.agentShare - left.agentShare);
+
+        const availableAgents = req.user.role === 'admin'
+            ? await User.find({ role: 'agent', isActive: true }).select('name email isAvailable').sort({ name: 1 }).lean()
+            : [];
+
+        return res.status(200).json({
+            message: 'Earnings summary loaded successfully.',
+            data: {
+                shareRates: {
+                    agent: AGENT_SHARE_RATE,
+                    admin: ADMIN_SHARE_RATE
+                },
+                totals,
+                monthlyBreakdown: buildMonthBuckets(rows),
+                recentTransactions: rows.slice(0, 20),
+                agentBreakdown,
+                agents: availableAgents
+            }
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to load earnings summary.' });
+    }
+};
 
 exports.getPayments = async (req, res) => {
     try {
