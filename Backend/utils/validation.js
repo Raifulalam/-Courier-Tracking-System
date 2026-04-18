@@ -22,7 +22,7 @@ function isValidPhone(value = '') {
     // ☎️ Landline: +977 optional, area code (1–3 digits) + 6–7 digits
     const landlinePattern = /^(?:\+977)?[1-9]\d{1,2}\d{6,7}$/;
 
-    return mobilePattern.test(cleaned) || landlinePattern.test(cleaned
+    return mobilePattern.test(cleaned) || landlinePattern.test(cleaned)
 }
 
 function isPositiveNumber(value) {
