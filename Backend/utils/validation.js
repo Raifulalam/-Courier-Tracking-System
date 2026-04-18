@@ -11,11 +11,18 @@ function isValidEmail(value = '') {
 }
 
 function isValidPhone(value = '') {
-    if (!value) {
-        return false;
-    }
+    if (!value) return false;
 
-    return /^[+]?[0-9\s\-()]{7,20}$/.test(normalizeText(value));
+    // Remove spaces, dashes, parentheses
+    const cleaned = value.replace(/[\s\-()]/g, '');
+
+    // 📱 Mobile: +977 optional, starts with 97/98, total 10 digits
+    const mobilePattern = /^(?:\+977)?9[78]\d{8}$/;
+
+    // ☎️ Landline: +977 optional, area code (1–3 digits) + 6–7 digits
+    const landlinePattern = /^(?:\+977)?[1-9]\d{1,2}\d{6,7}$/;
+
+    return mobilePattern.test(cleaned) || landlinePattern.test(cleaned
 }
 
 function isPositiveNumber(value) {

@@ -214,7 +214,7 @@ exports.createPackage = async (req, res) => {
         const basePrice = Number(pricing[routeType] || pricing.sameCity);
         const perKgRate = Number(pricing.perKgRate || 2.5);
         const deliveryMultiplier = serviceLevel === 'express' ? Number(pricing.expressMultiplier || 1.35) : 1;
-        
+
         const calculatedAmount = (basePrice + (Number(weight) * perKgRate)) * deliveryMultiplier;
 
         const shipment = await Package.create({
@@ -262,8 +262,32 @@ exports.createPackage = async (req, res) => {
 
         emitShipmentUpdate(req, shipment, { kind: 'created' });
 
-        queueShipmentCreatedEmails(shipment, otpCode);
-        sendOTPToReceiver(shipment.receiver.email, shipment.trackingId, otpCode).catch(console.error);
+        let emailSent = true;
+
+        try {
+            console.log("📤 Starting email process...");
+
+            console.log("Receiver Email:", shipment.receiver.email);
+            console.log("Sender Email:", shipment.sender.email);
+            console.log("Tracking ID:", shipment.trackingId);
+            console.log("OTP:", otpCode);
+
+            // ✅ Send OTP first
+            await sendOTPToReceiver(
+                shipment.receiver.email,
+                shipment.trackingId,
+                otpCode
+            );
+
+            // ✅ Send shipment emails
+            await sendShipmentCreatedEmails(shipment, otpCode);
+
+            console.log("✅ All emails sent successfully");
+
+        } catch (err) {
+            console.error("❌ Email sending failed:", err.message);
+            emailSent = false;
+        }
 
         const resData = sanitizeShipment(shipment, req.user);
         resData.deliveryOtp = otpCode;
