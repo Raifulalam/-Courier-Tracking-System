@@ -137,7 +137,8 @@ async function verifyGatewayPayment(method, query) {
         }
 
         // Technically we must verify the HMAC signature returned by eSewa too for production.
-        const message = `transaction_code=${payload.transaction_code},status=${payload.status},total_amount=${payload.total_amount},transaction_uuid=${payload.transaction_uuid},product_code=${ESEWA_MERCHANT_CODE},signed_field_names=${payload.signed_field_names}`;
+        const signedFields = payload.signed_field_names.split(',');
+        const message = signedFields.map(field => `${field}=${payload[field] || ''}`).join(',');
         const hash = crypto.createHmac('sha256', ESEWA_SECRET).update(message).digest('base64');
 
         if (hash !== payload.signature) {
