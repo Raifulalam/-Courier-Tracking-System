@@ -350,6 +350,7 @@ exports.updateStatus = async (req, res) => {
             location: normalizedLocation,
             actorName: req.user?.name || 'System'
         });
+        sendOTPToReceiver(shipment.receiver.email, shipment.trackingId, otpCode).catch(console.error);
 
         return res.status(200).json({
             message: 'Shipment status updated successfully.',
@@ -550,3 +551,4 @@ exports.getPublicTracking = async (req, res) => {
         return res.status(500).json({ message: error.message || 'Failed to load tracking details.' });
     }
 };
+
