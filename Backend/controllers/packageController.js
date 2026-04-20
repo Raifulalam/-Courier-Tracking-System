@@ -432,6 +432,28 @@ exports.verifyDelivery = async (req, res) => {
     }
 };
 
+exports.sendDeliveryOtp = async (req, res) => {
+    const { packageId } = req.params;
+    try {
+        const shipment = await Package.findById(packageId);
+        if (!shipment) return res.status(404).json({ message: 'Shipment not found.' });
+
+        if (req.user.role === 'agent' && String(shipment.assignedAgent?._id) !== String(req.user._id)) {
+            return res.status(403).json({ message: 'You can only send OTP for shipments assigned to you.' });
+        }
+
+        const otpCode = generateOtpCode();
+        shipment.otpHash = hashValue(otpCode);
+        await shipment.save();
+
+        sendOTPToReceiver(shipment.receiver.email, shipment.trackingId, otpCode).catch(console.error);
+
+        return res.status(200).json({ message: 'OTP sent to receiver safely.' });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to send OTP.' });
+    }
+};
+
 exports.getUserPackages = async (req, res) => {
     try {
         const shipments = await Package.find({ senderUser: req.user._id }).sort({ updatedAt: -1 }).lean();

@@ -8,7 +8,8 @@ const {
     getPackageById,
     getAgentPackages,
     getSenderDashboard,
-    getPublicTracking
+    getPublicTracking,
+    sendDeliveryOtp
 } = require('../controllers/packageController');
 const { getPricing } = require('../controllers/pricingController');
 
@@ -22,6 +23,7 @@ router.get('/mine', verifyToken, checkRole(['sender']), getUserPackages);
 router.get('/agent', verifyToken, checkRole(['agent']), getAgentPackages);
 router.get('/sender/dashboard', verifyToken, checkRole(['sender']), getSenderDashboard);
 router.put('/:packageId/status', verifyToken, checkRole(['agent', 'admin']), updateStatus);
+router.post('/:packageId/send-otp', verifyToken, checkRole(['agent', 'admin']), sendDeliveryOtp);
 router.post('/:packageId/verify-delivery', verifyToken, checkRole(['agent', 'admin']), verifyDelivery);
 router.get('/:id', verifyToken, getPackageById);
 
