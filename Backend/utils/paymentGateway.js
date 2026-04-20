@@ -24,7 +24,9 @@ async function initiateGatewayPayment(req, shipment, method, amount) {
     const baseUrl = getFrontendBaseUrl(req);
     const transactionUuid = `TXP-${shipment._id}-${Date.now()}`;
 
-    if (method === 'Khalti') {
+    const normalizedMethod = method.toLowerCase();
+
+    if (normalizedMethod === 'khalti') {
         const payload = {
             return_url: `${baseUrl}/payments/verify/khalti`,
             website_url: baseUrl,
@@ -60,7 +62,7 @@ async function initiateGatewayPayment(req, shipment, method, amount) {
             pidx: data.pidx // Keep reference if needed
         };
 
-    } else if (method === 'eSewa') {
+    } else if (normalizedMethod === 'esewa') {
         // eSewa HMAC generation
         const message = `total_amount=${amount},transaction_uuid=${transactionUuid},product_code=${ESEWA_MERCHANT_CODE}`;
         const hash = crypto.createHmac('sha256', ESEWA_SECRET).update(message).digest('base64');
@@ -93,7 +95,8 @@ async function initiateGatewayPayment(req, shipment, method, amount) {
  * Verifies payment payload coming from the frontend after user redirect.
  */
 async function verifyGatewayPayment(method, query) {
-    if (method === 'Khalti') {
+    const normalizedMethod = method.toLowerCase();
+    if (normalizedMethod === 'khalti') {
         // Khalti returns: pidx, transaction_id, tid, amount, mobile, purchase_order_id, purchase_order_name, status
         const { pidx } = query;
         if (!pidx) throw new Error('Missing Khalti transaction ID (pidx)');
@@ -122,7 +125,7 @@ async function verifyGatewayPayment(method, query) {
             shipmentId: data.purchase_order_id,
         };
 
-    } else if (method === 'eSewa') {
+    } else if (normalizedMethod === 'esewa') {
         // eSewa returns: data (base64 encoded JSON string)
         const encodedData = query.data;
         if (!encodedData) {
