@@ -8,6 +8,7 @@ const {
     notifyRole
 } = require('../utils/shipmentEvents');
 const { generateToken } = require('../utils/security');
+const { initiateGatewayPayment, verifyGatewayPayment } = require('../utils/paymentGateway');
 
 const AGENT_SHARE_RATE = 0.7;
 const ADMIN_SHARE_RATE = 0.3;
@@ -335,5 +336,91 @@ exports.payForShipment = async (req, res) => {
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to process payment.' });
+    }
+};
+
+exports.initiateGateway = async (req, res) => {
+    const { shipmentId } = req.params;
+    const { method } = req.body;
+
+    try {
+        const shipment = await Package.findById(shipmentId);
+        if (!shipment) return res.status(404).json({ message: 'Shipment not found.' });
+
+        if (!userCanAccessPayment(req.user, shipment)) {
+            return res.status(403).json({ message: 'Not authorized for this payment.' });
+        }
+
+        if (shipment.paymentStatus === 'Paid') {
+             return res.status(400).json({ message: 'Shipment is already paid.' });
+        }
+
+        const gatewayData = await initiateGatewayPayment(req, shipment, method, shipment.paymentAmount);
+        
+        return res.status(200).json({
+            message: 'Gateway initiated',
+            data: gatewayData
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Gateway initiation failed.' });
+    }
+};
+
+exports.verifyGateway = async (req, res) => {
+    const { method } = req.params;
+    const queryData = req.query;
+
+    try {
+        const verification = await verifyGatewayPayment(method, queryData);
+        
+        if (!verification.success) {
+            return res.status(400).json({ message: 'Verification failed.' });
+        }
+
+        const shipment = await Package.findById(verification.shipmentId);
+        if (!shipment) return res.status(404).json({ message: 'Shipment not found during verification.' });
+
+        if (shipment.paymentStatus === 'Paid') {
+            return res.status(200).json({ message: 'Already paid.', data: { shipmentId: shipment._id } });
+        }
+
+        // Complete the payment automatically under the system
+        const transactionId = verification.transactionId || `PAY-${generateToken(5).toUpperCase()}`;
+
+        const payment = await Payment.create({
+            shipmentId: shipment._id,
+            trackingId: shipment.trackingId,
+            amount: shipment.paymentAmount,
+            currency: shipment.currency,
+            method,
+            status: 'Paid',
+            paidByRole: 'system', // Verified via gateway hook
+            transactionId,
+            paidAt: new Date()
+        });
+
+        shipment.paymentStatus = 'Paid';
+        await shipment.save();
+
+        const message = `Payment completed securely via ${method} for shipment ${shipment.trackingId}.`;
+
+        const userNotifications = await createNotificationsForUsers({
+            userIds: [shipment.senderUser, shipment.receiverUser, shipment.assignedAgent?._id].filter(Boolean),
+            type: 'payment.updated',
+            title: `Payment Paid`,
+            message,
+            shipment,
+            metadata: { paymentId: payment._id, transactionId, method }
+        });
+
+        emitNotificationEvents(req, userNotifications);
+        emitShipmentUpdate(req, shipment, { kind: 'payment', paymentStatus: shipment.paymentStatus });
+
+        return res.status(200).json({
+            message: 'Payment verified successfully.',
+            data: { shipmentId: shipment._id }
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Payment verification failed.' });
     }
 };
